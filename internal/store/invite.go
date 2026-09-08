@@ -3,12 +3,10 @@ package store
 import (
 	"crypto/rand"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -51,37 +49,22 @@ func (i *Invite) Status(now time.Time) string {
 	}
 }
 
-func (s *Store) invitesPath() string { return filepath.Join(s.dir, "invites.json") }
-
-func (s *Store) loadInvites() error {
-	b, err := os.ReadFile(s.invitesPath())
-	if os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	var list []*Invite
-	if err := json.Unmarshal(b, &list); err != nil {
-		return fmt.Errorf("invites.json: %w", err)
-	}
-	for _, iv := range list {
-		s.invites[iv.ID] = iv
-	}
-	return nil
-}
-
-// saveInvites must be called with s.mu held.
-func (s *Store) saveInvites() error {
-	list := make([]*Invite, 0, len(s.invites))
-	for _, iv := range s.invites {
-		list = append(list, iv)
-	}
-	sort.Slice(list, func(i, j int) bool { return list[i].Created.After(list[j].Created) })
-	return writeJSONAtomic(s.invitesPath(), list, 0o600)
-}
-
 // InviteTTL bounds how long an unclaimed link stays usable.
 const InviteTTL = 7 * 24 * time.Hour
+
+const inviteColumns = `id, digest, role, note, created_by, created, expires, claimed_by, claimed, revoked`
+
+func scanInvite(row rowScanner) (*Invite, error) {
+	var iv Invite
+	var created, expires string
+	var claimed sql.NullString
+	if err := row.Scan(&iv.ID, &iv.Digest, &iv.Role, &iv.Note, &iv.CreatedBy,
+		&created, &expires, &iv.ClaimedBy, &claimed, &iv.Revoked); err != nil {
+		return nil, err
+	}
+	iv.Created, iv.Expires, iv.Claimed = goTime(created), goTime(expires), goTimePtr(claimed)
+	return &iv, nil
+}
 
 // CreateInvite mints an invite and returns it together with the secret to put
 // in the URL. The secret is returned exactly once and cannot be recovered.
@@ -108,70 +91,97 @@ func (s *Store) CreateInvite(createdBy string, role Role, note string, ttl time.
 		Created:   now,
 		Expires:   now.Add(ttl),
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.invites[iv.ID] = iv
-	if err := s.saveInvites(); err != nil {
-		delete(s.invites, iv.ID)
+	if _, err := s.db.Exec(
+		`INSERT INTO invites (`+inviteColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		iv.ID, iv.Digest, iv.Role, iv.Note, iv.CreatedBy,
+		dbTime(iv.Created), dbTime(iv.Expires), "", nil, false); err != nil {
 		return nil, "", err
 	}
 	return iv, token, nil
 }
 
 // InviteByToken resolves the secret from a URL to an invite that can still be
-// claimed. The comparison is constant-time against every stored digest, so a
-// caller cannot learn which invites exist by timing the lookup.
+// claimed. The digest comparison is constant-time, so a caller cannot learn
+// which invitations exist by timing the lookup.
 func (s *Store) InviteByToken(token string) (*Invite, bool) {
 	if token == "" {
 		return nil, false
 	}
-	want := s.MAC("invite", token)
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	iv, err := findInviteByToken(s.db, s.MAC("invite", token))
+	if err != nil || !iv.Open(time.Now()) {
+		return nil, false
+	}
+	return iv, true
+}
+
+// findInviteByToken scans every invite and compares in constant time, rather
+// than letting SQLite match the digest, so lookup time does not depend on which
+// invitations exist.
+func findInviteByToken(q queryer, want string) (*Invite, error) {
+	rows, err := q.Query(`SELECT ` + inviteColumns + ` FROM invites`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	var found *Invite
-	for _, iv := range s.invites {
+	for rows.Next() {
+		iv, err := scanInvite(rows)
+		if err != nil {
+			return nil, err
+		}
 		if subtle.ConstantTimeCompare([]byte(iv.Digest), []byte(want)) == 1 {
 			found = iv
 		}
 	}
-	if found == nil || !found.Open(time.Now()) {
-		return nil, false
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	c := *found
-	return &c, true
+	if found == nil {
+		return nil, ErrNotFound
+	}
+	return found, nil
 }
 
 // Invites returns every invite, newest first.
 func (s *Store) Invites() []*Invite {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]*Invite, 0, len(s.invites))
-	for _, iv := range s.invites {
-		c := *iv
-		out = append(out, &c)
+	rows, err := s.db.Query(`SELECT ` + inviteColumns + ` FROM invites ORDER BY created DESC`)
+	if err != nil {
+		return nil
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Created.After(out[j].Created) })
+	defer rows.Close()
+	var out []*Invite
+	for rows.Next() {
+		iv, err := scanInvite(rows)
+		if err != nil {
+			return out
+		}
+		out = append(out, iv)
+	}
 	return out
 }
 
 // RevokeInvite closes an unclaimed link.
 func (s *Store) RevokeInvite(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	iv, ok := s.invites[id]
-	if !ok {
-		return fmt.Errorf("invite %q: %w", id, ErrNotFound)
-	}
-	if iv.ClaimedBy != "" {
-		return fmt.Errorf("that invite has already been claimed")
-	}
-	iv.Revoked = true
-	return s.saveInvites()
+	return s.tx(func(tx *sql.Tx) error {
+		var claimedBy string
+		err := tx.QueryRow(`SELECT claimed_by FROM invites WHERE id = ?`, id).Scan(&claimedBy)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("invite %q: %w", id, ErrNotFound)
+		} else if err != nil {
+			return err
+		}
+		if claimedBy != "" {
+			return fmt.Errorf("that invite has already been claimed")
+		}
+		_, err = tx.Exec(`UPDATE invites SET revoked = 1 WHERE id = ?`, id)
+		return err
+	})
 }
 
-// ClaimInvite creates a pending account from an invite, in one step so a single
-// link cannot produce two accounts. The account exists but can do nothing until
-// an administrator approves it.
+// ClaimInvite creates a pending account from an invite. Creating the account
+// and spending the link happen in one transaction, which is what makes the link
+// genuinely single-use rather than single-use-if-nobody-races-you. The account
+// exists but can do nothing until an administrator approves it.
 func (s *Store) ClaimInvite(token, name, password string) (*User, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -186,83 +196,35 @@ func (s *Store) ClaimInvite(token, name, password string) (*User, error) {
 	}
 	want := s.MAC("invite", token)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var iv *Invite
-	for _, cand := range s.invites {
-		if subtle.ConstantTimeCompare([]byte(cand.Digest), []byte(want)) == 1 {
-			iv = cand
+	var u *User
+	err = s.tx(func(tx *sql.Tx) error {
+		iv, err := findInviteByToken(tx, want)
+		if err != nil || !iv.Open(time.Now()) {
+			return fmt.Errorf("that invitation link is no longer valid")
 		}
-	}
-	if iv == nil || !iv.Open(time.Now()) {
-		return nil, fmt.Errorf("that invitation link is no longer valid")
-	}
-	if _, taken := s.users[name]; taken {
-		return nil, fmt.Errorf("the username %q is already taken", name)
-	}
-
-	now := time.Now().UTC()
-	u := &User{
-		Name:      name,
-		Role:      iv.Role,
-		Hash:      hash,
-		Created:   now,
-		Pending:   true,
-		InvitedBy: iv.CreatedBy,
-	}
-	s.users[name] = u
-	iv.ClaimedBy, iv.Claimed = name, now
-
-	if err := s.saveUsers(); err != nil {
-		delete(s.users, name)
-		iv.ClaimedBy, iv.Claimed = "", time.Time{}
-		return nil, err
-	}
-	if err := s.saveInvites(); err != nil {
-		// The account exists and the link is spent in memory; leaving the file
-		// stale would let the link be reused after a restart, so undo instead.
-		delete(s.users, name)
-		iv.ClaimedBy, iv.Claimed = "", time.Time{}
-		_ = s.saveUsers()
+		var taken int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM users WHERE name = ?`, name).Scan(&taken); err != nil {
+			return err
+		}
+		if taken > 0 {
+			return fmt.Errorf("the username %q is already taken", name)
+		}
+		now := time.Now().UTC()
+		u = &User{
+			Name: name, Role: iv.Role, Hash: hash, Created: now,
+			Pending: true, InvitedBy: iv.CreatedBy,
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO users (`+userColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			u.Name, u.Role, u.Hash, dbTime(u.Created), false, true, u.InvitedBy); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`UPDATE invites SET claimed_by = ?, claimed = ? WHERE id = ?`,
+			name, dbTime(now), iv.ID)
+		return err
+	})
+	if err != nil {
 		return nil, err
 	}
 	return u, nil
-}
-
-// ApproveUser clears the pending flag and sets the account's role.
-func (s *Store) ApproveUser(name string, role Role) error {
-	if !ValidRole(role) {
-		return fmt.Errorf("unknown role %q", role)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.users[name]
-	if !ok {
-		return fmt.Errorf("user %q: %w", name, ErrNotFound)
-	}
-	if !u.Pending {
-		return fmt.Errorf("%q is already approved", name)
-	}
-	prevRole, prevPending := u.Role, u.Pending
-	u.Role, u.Pending = role, false
-	if err := s.saveUsers(); err != nil {
-		u.Role, u.Pending = prevRole, prevPending
-		return err
-	}
-	return nil
-}
-
-// PendingUsers returns accounts awaiting approval, oldest first.
-func (s *Store) PendingUsers() []*User {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var out []*User
-	for _, u := range s.users {
-		if u.Pending {
-			out = append(out, u)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Created.Before(out[j].Created) })
-	return out
 }

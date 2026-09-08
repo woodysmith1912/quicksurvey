@@ -1,5 +1,11 @@
 # QuickSurvey — development TODO
 
+## Next
+- [ ] Kubernetes manifests for DOKS: StatefulSet, one replica,
+      `do-block-storage` PVC, a StorageClass with `reclaimPolicy: Retain`,
+      probes on `/healthz`, ingress + cert-manager for plainwrapworks.com,
+      and a scheduled CSI VolumeSnapshot for backups.
+
 ## Improvements
 - [x] The front page is a splash that explains the site; the sign-in link sits
       quietly at the top right.
@@ -14,10 +20,11 @@
       stable per person so returning to edit an answer does not move the boxes.
 
 ## Done and verified by tests
-- [x] `internal/store` — file-backed store, atomic definition writes, HMAC key
+- [x] `internal/store` — SQLite (`modernc.org/sqlite`, pure Go, no cgo);
+      WAL, `BEGIN IMMEDIATE`, foreign keys, one connection
 - [x] Accounts: PBKDF2-SHA256, viewer/editor/admin, last-admin protection
 - [x] Survey and option model, soft delete, merge resolution through chains
-- [x] Append-only response log; replay on start; torn final line skipped, not fatal
+- [x] One response row per respondent; resubmission replaces it in a transaction
 - [x] Per-survey pseudonymous voter IDs; repeat submission replaces
 - [x] Write-in moderation: pending is private to its author, counts on approval
 - [x] TSV export, wide and summary; tabs and newlines in free text sanitised
@@ -26,14 +33,15 @@
 - [x] Invitations: single-use links, digests only on disk, pending accounts
       gated to a waiting page until an admin approves them
 - [x] `cmd/quicksurvey` — `serve`, `user`, `export`; bootstrap admin on first start
+- [x] `quicksurvey backup` via `VACUUM INTO` — safe against a live instance
 - [x] Dockerfile, compose file, Makefile
 - [x] README.md, DESIGN.md
-- [x] Go tests: 77 across `internal/store`, `internal/export`, `internal/web` — `make test`
+- [x] Go tests: 78 across `internal/store`, `internal/export`, `internal/web` — `make test`
 - [x] Playwright specs: respondent, write-in/moderation, admin, accounts,
       splash, draft preview, invitations
 
 ## Verified on this machine
-- [x] `make test` — 77 Go tests, green
+- [x] `make test` — 78 Go tests, green
 - [x] `make e2e-docker` — 33 Playwright tests, green, 40s, nothing installed on
       the host. Slowest single test 1.8s; every interaction capped at 3s.
 - [x] Image builds distroless and runs read-only as uid 65532; Docker reports
@@ -62,9 +70,15 @@
 ## Known gaps, deliberate
 - No rate limit on `POST /login` or on write-ins beyond 5 pending per voter.
   The README says the reverse proxy should provide one.
-- The response log is never compacted: a voter who edits their answer 1000
-  times leaves 1000 lines. Bounded by intent, not by code.
-- One process per data directory. No file locking, so no horizontal scaling.
+- One writer by design. SQLite makes a second process safe rather than
+  corrupting, but nothing above the storage layer wants one — run one replica.
+- The project no longer has zero dependencies. `modernc.org/sqlite` brings
+  about ten modules. That was the price of not inventing a locking scheme, and
+  it was worth paying; `CGO_ENABLED=0` and the distroless static image both
+  survive.
+- Superseded answers are not retained. Crash safety came from the append-only
+  log; WAL provides it now, and keeping a history would mean storing more about
+  respondents than the application needs.
 - `quicksurvey user add` does not suppress terminal echo — that would cost an
   external dependency for a fallback path. Pipe the password instead.
 

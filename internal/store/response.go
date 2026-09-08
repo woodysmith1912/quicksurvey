@@ -1,22 +1,24 @@
 package store
 
 import (
-	"bufio"
-	"encoding/json"
+	"database/sql"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
 
-// Response is one person's answer to one survey.
+// Response is one person's current answer to one survey.
 //
 // It deliberately contains nothing that identifies a human being: no account,
 // no IP address, no user agent. Voter is a per-survey pseudonym derived from a
 // random browser cookie (see Store.VoterID), which is what makes repeat
 // submissions detectable without making respondents identifiable.
+//
+// There is one row per respondent per survey. A second submission replaces the
+// first rather than adding to it, which is what stops anyone inflating a count
+// by resubmitting. Superseded answers are not retained.
 type Response struct {
 	ID      string    `json:"id"`
 	Voter   string    `json:"voter"`
@@ -53,102 +55,56 @@ func (s *Store) VoterID(surveyID, token string) string {
 	return s.MAC("voter", surveyID, token)[:22]
 }
 
-func (s *Store) responsePath(surveyID string) string {
-	return filepath.Join(s.surveyDir(surveyID), "responses.jsonl")
-}
-
-// loadResponses replays the append-only log. Later records for the same voter
-// supersede earlier ones, which is how vote edits work.
-func (s *Store) loadResponses(surveyID string) error {
-	byVoter := map[string]*Response{}
-	s.responses[surveyID] = byVoter
-
-	f, err := os.Open(s.responsePath(surveyID))
-	if os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for line := 1; sc.Scan(); line++ {
-		b := strings.TrimSpace(sc.Text())
-		if b == "" {
-			continue
-		}
-		var r Response
-		if err := json.Unmarshal([]byte(b), &r); err != nil {
-			// A torn final line is the expected failure after a hard kill.
-			// Skipping it loses one response; refusing to start loses all.
-			fmt.Fprintf(os.Stderr, "quicksurvey: survey %s: skipping unreadable response at line %d: %v\n", surveyID, line, err)
-			continue
-		}
-		byVoter[r.Voter] = &r
-	}
-	return sc.Err()
-}
-
-// appendResponse must be called with s.mu held.
-func (s *Store) appendResponse(surveyID string, r *Response) error {
-	b, err := json.Marshal(r)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(s.responsePath(surveyID), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := f.Write(append(b, '\n')); err != nil {
-		return err
-	}
-	return f.Sync()
-}
-
 // MaxComment bounds the free-text field, so one respondent cannot fill the disk.
 const MaxComment = 2000
 
 // SaveResponse records a respondent's choices, replacing any answer they
-// previously gave. It returns the stored response.
+// previously gave.
 func (s *Store) SaveResponse(surveyID, voter string, choices []string, comment string) (*Response, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.saveResponseLocked(surveyID, voter, choices, comment, "", false)
+	return s.saveResponse(surveyID, voter, choices, comment, "", false)
 }
 
 // PreviewResponse is SaveResponse for an editor trying out a survey that is
 // still a draft. Such responses are real records, and are discarded when the
 // survey is published for the first time.
 func (s *Store) PreviewResponse(surveyID, voter string, choices []string, comment string) (*Response, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.saveResponseLocked(surveyID, voter, choices, comment, "", true)
+	return s.saveResponse(surveyID, voter, choices, comment, "", true)
 }
 
-// saveResponseLocked is the body of SaveResponse. It must be called with s.mu
-// held, which is what lets AddWriteIn create an option and vote for it in one
-// atomic step.
+func (s *Store) saveResponse(surveyID, voter string, choices []string, comment, allowPending string, preview bool) (*Response, error) {
+	var out *Response
+	err := s.tx(func(tx *sql.Tx) error {
+		var err error
+		out, err = saveResponseTx(tx, surveyID, voter, choices, comment, allowPending, preview)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// saveResponseTx is the body of SaveResponse, inside a caller's transaction.
 //
 // Choices are filtered against the survey: a respondent may select approved
 // options, pending write-ins they already had selected, and allowPending, which
 // is the option they are proposing in this same request. Anything else is
 // dropped rather than rejected, so a stale form does not lose the whole ballot.
-func (s *Store) saveResponseLocked(surveyID, voter string, choices []string, comment, allowPending string, preview bool) (*Response, error) {
-	sv, ok := s.surveys[surveyID]
-	if !ok {
+func saveResponseTx(tx *sql.Tx, surveyID, voter string, choices []string, comment, allowPending string, preview bool) (*Response, error) {
+	sv, err := loadSurvey(tx, surveyID)
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("survey %q: %w", surveyID, ErrNotFound)
+	} else if err != nil {
+		return nil, err
 	}
 	if !sv.AcceptingFrom(time.Now(), preview) {
 		return nil, fmt.Errorf("survey is not accepting responses")
 	}
-	byVoter := s.responses[surveyID]
-	if byVoter == nil {
-		byVoter = map[string]*Response{}
-		s.responses[surveyID] = byVoter
+
+	prev, err := loadResponse(tx, surveyID, voter)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
 	}
-	prev := byVoter[voter]
 
 	now := time.Now().UTC()
 	r := &Response{ID: newID(12), Voter: voter, Created: now, Updated: now}
@@ -164,9 +120,9 @@ func (s *Store) saveResponseLocked(surveyID, voter string, choices []string, com
 		switch o.Status {
 		case OptApproved:
 		case OptPending:
-			// A pending write-in is selectable only by the person who
-			// proposed it: either they are proposing it right now, or their
-			// previous response already references it.
+			// A pending write-in is selectable only by the person who proposed
+			// it: either they are proposing it right now, or their previous
+			// response already references it.
 			if id != allowPending && (prev == nil || !prev.Chose(id)) {
 				continue
 			}
@@ -183,78 +139,112 @@ func (s *Store) saveResponseLocked(surveyID, voter string, choices []string, com
 		r.Comment = comment
 	}
 
-	if err := s.appendResponse(surveyID, r); err != nil {
+	if _, err := tx.Exec(
+		`INSERT INTO responses (id, survey_id, voter, comment, created, updated)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(survey_id, voter) DO UPDATE SET
+		   comment = excluded.comment, updated = excluded.updated`,
+		r.ID, surveyID, voter, r.Comment, dbTime(r.Created), dbTime(r.Updated)); err != nil {
 		return nil, err
 	}
-	byVoter[voter] = r
+	if _, err := tx.Exec(`DELETE FROM choices WHERE response_id = ?`, r.ID); err != nil {
+		return nil, err
+	}
+	for _, id := range r.Choices {
+		if _, err := tx.Exec(
+			`INSERT INTO choices (response_id, option_id) VALUES (?, ?)`, r.ID, id); err != nil {
+			return nil, err
+		}
+	}
 	return r.Clone(), nil
 }
 
+func loadResponse(q queryer, surveyID, voter string) (*Response, error) {
+	var r Response
+	var created, updated string
+	err := q.QueryRow(
+		`SELECT id, voter, comment, created, updated FROM responses WHERE survey_id = ? AND voter = ?`,
+		surveyID, voter).Scan(&r.ID, &r.Voter, &r.Comment, &created, &updated)
+	if err != nil {
+		return nil, err
+	}
+	r.Created, r.Updated = goTime(created), goTime(updated)
+	rows, err := q.Query(`SELECT option_id FROM choices WHERE response_id = ?`, r.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		r.Choices = append(r.Choices, id)
+	}
+	return &r, rows.Err()
+}
+
+const maxWriteInsPerVoter = 5
+
 // AddWriteIn records a proposed option and the submitter's vote for it in one
-// step. The option is pending, so it neither appears on anyone else's ballot nor
-// counts in the tally until a moderator approves it. Their existing selections
-// and comment are carried forward, so proposing an option does not discard the
-// rest of their ballot.
-//
-// Both writes happen under one lock, and the option is rolled back if the
-// response cannot be stored, so a failure cannot leave an orphan in the
-// moderation queue.
+// transaction. The option is pending, so it neither appears on anyone else's
+// ballot nor counts in the tally until a moderator approves it. Their existing
+// selections and comment are carried forward, so proposing an option does not
+// discard the rest of their ballot.
 func (s *Store) AddWriteIn(surveyID, voter, text string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.addWriteInLocked(surveyID, voter, text, false)
+	return s.addWriteIn(surveyID, voter, text, false)
 }
 
 // PreviewWriteIn is AddWriteIn for an editor trying out a draft survey.
 func (s *Store) PreviewWriteIn(surveyID, voter, text string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.addWriteInLocked(surveyID, voter, text, true)
+	return s.addWriteIn(surveyID, voter, text, true)
 }
 
-func (s *Store) addWriteInLocked(surveyID, voter, text string, preview bool) (string, error) {
-	sv, ok := s.surveys[surveyID]
-	if !ok {
-		return "", fmt.Errorf("survey %q: %w", surveyID, ErrNotFound)
-	}
-	if !sv.AllowWriteIn {
-		return "", fmt.Errorf("this survey does not accept write-ins")
-	}
-	if !sv.AcceptingFrom(time.Now(), preview) {
-		return "", fmt.Errorf("survey is not accepting responses")
-	}
-	prev := s.responses[surveyID][voter]
-	if n := countPending(sv, prev); n >= maxWriteInsPerVoter {
-		return "", fmt.Errorf("you already have %d suggestions awaiting review", n)
-	}
-
-	draft := sv.Clone()
-	newOpt, err := AddOption(draft, text, OptPending, "writein")
-	if err != nil {
-		return "", err
-	}
-	draft.Updated = time.Now().UTC()
-	if err := s.saveSurvey(draft); err != nil {
-		return "", err
-	}
-	s.surveys[surveyID] = draft
-
-	var choices []string
-	var comment string
-	if prev != nil {
-		choices, comment = append([]string(nil), prev.Choices...), prev.Comment
-	}
-	if _, err := s.saveResponseLocked(surveyID, voter, append(choices, newOpt), comment, newOpt, preview); err != nil {
-		s.surveys[surveyID] = sv // roll back rather than leave an unvoted-for suggestion
-		if saveErr := s.saveSurvey(sv); saveErr != nil {
-			return "", fmt.Errorf("%w (and rolling back the suggestion failed: %v)", err, saveErr)
+func (s *Store) addWriteIn(surveyID, voter, text string, preview bool) (string, error) {
+	var newOpt string
+	err := s.tx(func(tx *sql.Tx) error {
+		sv, err := loadSurvey(tx, surveyID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("survey %q: %w", surveyID, ErrNotFound)
+		} else if err != nil {
+			return err
 		}
+		if !sv.AllowWriteIn {
+			return fmt.Errorf("this survey does not accept write-ins")
+		}
+		if !sv.AcceptingFrom(time.Now(), preview) {
+			return fmt.Errorf("survey is not accepting responses")
+		}
+
+		prev, err := loadResponse(tx, surveyID, voter)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if n := countPending(sv, prev); n >= maxWriteInsPerVoter {
+			return fmt.Errorf("you already have %d suggestions awaiting review", n)
+		}
+
+		if newOpt, err = AddOption(sv, text, OptPending, "writein"); err != nil {
+			return err
+		}
+		sv.Updated = time.Now().UTC()
+		if err := saveSurvey(tx, sv); err != nil {
+			return err
+		}
+
+		var choices []string
+		var comment string
+		if prev != nil {
+			choices, comment = append([]string(nil), prev.Choices...), prev.Comment
+		}
+		_, err = saveResponseTx(tx, surveyID, voter, append(choices, newOpt), comment, newOpt, preview)
+		return err
+	})
+	if err != nil {
 		return "", err
 	}
 	return newOpt, nil
 }
-
-const maxWriteInsPerVoter = 5
 
 // countPending reports how many of a respondent's selections are still awaiting
 // moderation.
@@ -271,23 +261,95 @@ func countPending(sv *Survey, r *Response) int {
 	return n
 }
 
-// ClearResponses discards every response to a survey, returning how many
-// people had answered. Irreversible: the log file is removed, not truncated.
-func (s *Store) ClearResponses(surveyID string) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.clearResponsesLocked(surveyID)
+// ResponseFor returns the answer this voter previously gave, if any.
+func (s *Store) ResponseFor(surveyID, voter string) (*Response, bool) {
+	r, err := loadResponse(s.db, surveyID, voter)
+	if err != nil {
+		return nil, false
+	}
+	return r, true
 }
 
-func (s *Store) clearResponsesLocked(surveyID string) (int, error) {
-	if _, ok := s.surveys[surveyID]; !ok {
-		return 0, fmt.Errorf("survey %q: %w", surveyID, ErrNotFound)
+// Responses returns every respondent's current answer, oldest first.
+func (s *Store) Responses(surveyID string) []*Response {
+	rows, err := s.db.Query(
+		`SELECT id, voter, comment, created, updated FROM responses
+		 WHERE survey_id = ? ORDER BY created, id`, surveyID)
+	if err != nil {
+		return nil
 	}
-	n := len(s.responses[surveyID])
-	if err := os.Remove(s.responsePath(surveyID)); err != nil && !os.IsNotExist(err) {
+	defer rows.Close()
+	var out []*Response
+	for rows.Next() {
+		var r Response
+		var created, updated string
+		if err := rows.Scan(&r.ID, &r.Voter, &r.Comment, &created, &updated); err != nil {
+			return out
+		}
+		r.Created, r.Updated = goTime(created), goTime(updated)
+		out = append(out, &r)
+	}
+	if err := rows.Err(); err != nil {
+		return out
+	}
+	byID := make(map[string]*Response, len(out))
+	for _, r := range out {
+		byID[r.ID] = r
+	}
+	crows, err := s.db.Query(
+		`SELECT c.response_id, c.option_id FROM choices c
+		 JOIN responses r ON r.id = c.response_id WHERE r.survey_id = ?`, surveyID)
+	if err != nil {
+		return out
+	}
+	defer crows.Close()
+	for crows.Next() {
+		var rid, oid string
+		if err := crows.Scan(&rid, &oid); err != nil {
+			return out
+		}
+		if r, ok := byID[rid]; ok {
+			r.Choices = append(r.Choices, oid)
+		}
+	}
+	return out
+}
+
+// Count reports how many people have responded to a survey.
+func (s *Store) Count(surveyID string) int {
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM responses WHERE survey_id = ?`, surveyID).Scan(&n)
+	return n
+}
+
+// ClearResponses discards every response to a survey, returning how many people
+// had answered. Irreversible.
+func (s *Store) ClearResponses(surveyID string) (int, error) {
+	var n int
+	err := s.tx(func(tx *sql.Tx) error {
+		var err error
+		n, err = clearResponsesTx(tx, surveyID)
+		return err
+	})
+	return n, err
+}
+
+func clearResponsesTx(tx *sql.Tx, surveyID string) (int, error) {
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM surveys WHERE id = ?`, surveyID).Scan(&exists); err != nil {
 		return 0, err
 	}
-	s.responses[surveyID] = map[string]*Response{}
+	if exists == 0 {
+		return 0, fmt.Errorf("survey %q: %w", surveyID, ErrNotFound)
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM responses WHERE survey_id = ?`, surveyID).Scan(&n); err != nil {
+		return 0, err
+	}
+	// choices go too, through ON DELETE CASCADE.
+	if _, err := tx.Exec(`DELETE FROM responses WHERE survey_id = ?`, surveyID); err != nil {
+		return 0, err
+	}
 	return n, nil
 }
 
@@ -296,67 +358,38 @@ func (s *Store) clearResponsesLocked(surveyID string) (int, error) {
 // previewing it could have produced them, so they are test data. It returns how
 // many were discarded.
 func (s *Store) Publish(surveyID string) (discarded int, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	sv, ok := s.surveys[surveyID]
-	if !ok {
-		return 0, fmt.Errorf("survey %q: %w", surveyID, ErrNotFound)
-	}
-	draft := sv.Clone()
-	now := time.Now().UTC()
-	first := draft.FirstOpenedAt.IsZero()
-	if first {
-		draft.FirstOpenedAt = now
-	}
-	draft.State = StateOpen
-	// Reopening a survey whose scheduled close has passed would otherwise take
-	// effect for zero seconds.
-	if !draft.CloseAt.IsZero() && !now.Before(draft.CloseAt) {
-		draft.CloseAt = time.Time{}
-	}
-	draft.Updated = now
-	if err := s.saveSurvey(draft); err != nil {
+	err = s.tx(func(tx *sql.Tx) error {
+		sv, err := loadSurvey(tx, surveyID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("survey %q: %w", surveyID, ErrNotFound)
+		} else if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		first := sv.FirstOpenedAt.IsZero()
+		if first {
+			sv.FirstOpenedAt = now
+		}
+		sv.State = StateOpen
+		// Reopening a survey whose scheduled close has passed would otherwise
+		// take effect for zero seconds.
+		if !sv.CloseAt.IsZero() && !now.Before(sv.CloseAt) {
+			sv.CloseAt = time.Time{}
+		}
+		sv.Updated = now
+		if err := saveSurvey(tx, sv); err != nil {
+			return err
+		}
+		if first {
+			discarded, err = clearResponsesTx(tx, surveyID)
+			return err
+		}
+		return nil
+	})
+	if err != nil {
 		return 0, err
 	}
-	s.surveys[surveyID] = draft
-
-	if first {
-		if discarded, err = s.clearResponsesLocked(surveyID); err != nil {
-			return 0, err
-		}
-	}
 	return discarded, nil
-}
-
-// ResponseFor returns a copy of the answer this voter previously gave, if any.
-func (s *Store) ResponseFor(surveyID, voter string) (*Response, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	r, ok := s.responses[surveyID][voter]
-	if !ok {
-		return nil, false
-	}
-	return r.Clone(), true
-}
-
-// Responses returns the current answer of every respondent, oldest first.
-func (s *Store) Responses(surveyID string) []*Response {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]*Response, 0, len(s.responses[surveyID]))
-	for _, r := range s.responses[surveyID] {
-		out = append(out, r.Clone())
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Created.Before(out[j].Created) })
-	return out
-}
-
-// Count reports how many people have responded to a survey.
-func (s *Store) Count(surveyID string) int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.responses[surveyID])
 }
 
 // Result is one row of a tally.
@@ -370,14 +403,12 @@ type Result struct {
 // number of people who answered, which is the denominator for Percent: options
 // are not mutually exclusive, so percentages do not sum to 100.
 func (s *Store) Tally(surveyID string) (results []Result, respondents int) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	sv := s.surveys[surveyID]
-	if sv == nil {
+	sv, ok := s.Survey(surveyID)
+	if !ok {
 		return nil, 0
 	}
 	counts := map[string]int{}
-	for _, r := range s.responses[surveyID] {
+	for _, r := range s.Responses(surveyID) {
 		respondents++
 		counted := map[string]bool{}
 		for _, id := range r.Choices {
@@ -399,6 +430,10 @@ func (s *Store) Tally(surveyID string) (results []Result, respondents int) {
 		}
 		results = append(results, res)
 	}
-	sort.SliceStable(results, func(i, j int) bool { return results[i].Votes > results[j].Votes })
+	sortResultsByVotes(results)
 	return results, respondents
+}
+
+func sortResultsByVotes(results []Result) {
+	sort.SliceStable(results, func(i, j int) bool { return results[i].Votes > results[j].Votes })
 }

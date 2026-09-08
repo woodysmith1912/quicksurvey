@@ -5,12 +5,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base64"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +47,10 @@ type User struct {
 	Pending   bool   `json:"pending,omitempty"`
 	InvitedBy string `json:"invited_by,omitempty"`
 }
+
+// SessionKey is the value a session cookie is bound to. Including the password
+// hash means changing a password logs out that user everywhere.
+func (u *User) SessionKey() string { return u.Name + "\x00" + u.Hash }
 
 const pbkdf2Iterations = 600_000 // OWASP guidance for PBKDF2-HMAC-SHA256
 
@@ -93,37 +95,33 @@ func verifyPassword(encoded, password string) bool {
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
-func (s *Store) usersPath() string { return filepath.Join(s.dir, "users.json") }
+const userColumns = `name, role, hash, created, must_change_password, pending, invited_by`
 
-func (s *Store) loadUsers() error {
-	b, err := os.ReadFile(s.usersPath())
-	if os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return err
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanUser(row rowScanner) (*User, error) {
+	var u User
+	var created string
+	if err := row.Scan(&u.Name, &u.Role, &u.Hash, &created,
+		&u.MustChangePassword, &u.Pending, &u.InvitedBy); err != nil {
+		return nil, err
 	}
-	var list []*User
-	if err := json.Unmarshal(b, &list); err != nil {
-		return fmt.Errorf("users.json: %w", err)
-	}
-	for _, u := range list {
-		s.users[u.Name] = u
-	}
-	return nil
+	u.Created = goTime(created)
+	return &u, nil
 }
 
-// saveUsers must be called with s.mu held.
-func (s *Store) saveUsers() error {
-	list := make([]*User, 0, len(s.users))
-	for _, u := range s.users {
-		list = append(list, u)
-	}
-	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
-	return writeJSONAtomic(s.usersPath(), list, 0o600)
-}
-
-// AddUser creates an account. It fails if the name is taken.
+// AddUser creates an approved account. It fails if the name is taken.
 func (s *Store) AddUser(name string, role Role, password string) (*User, error) {
+	return s.addUser(name, role, password, false, false, "")
+}
+
+// AddUserMustChange creates an account required to set a new password before it
+// can do anything else. Used for the bootstrap administrator.
+func (s *Store) AddUserMustChange(name string, role Role, password string) (*User, error) {
+	return s.addUser(name, role, password, true, false, "")
+}
+
+func (s *Store) addUser(name string, role Role, password string, mustChange, pending bool, invitedBy string) (*User, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, fmt.Errorf("username must not be empty")
@@ -138,22 +136,24 @@ func (s *Store) AddUser(name string, role Role, password string) (*User, error) 
 	if err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.users[name]; ok {
-		return nil, fmt.Errorf("user %q: %w", name, ErrExists)
+	u := &User{
+		Name: name, Role: role, Hash: hash, Created: time.Now().UTC(),
+		MustChangePassword: mustChange, Pending: pending, InvitedBy: invitedBy,
 	}
-	u := &User{Name: name, Role: role, Hash: hash, Created: time.Now().UTC()}
-	s.users[name] = u
-	if err := s.saveUsers(); err != nil {
-		delete(s.users, name)
+	_, err = s.db.Exec(
+		`INSERT INTO users (`+userColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		u.Name, u.Role, u.Hash, dbTime(u.Created), u.MustChangePassword, u.Pending, u.InvitedBy)
+	if err != nil {
+		if isUnique(err) {
+			return nil, fmt.Errorf("user %q: %w", name, ErrExists)
+		}
 		return nil, err
 	}
 	return u, nil
 }
 
 // SetPassword replaces a user's password, which also invalidates their existing
-// sessions (session MACs are bound to the password hash).
+// sessions, since a session MAC covers the password hash.
 func (s *Store) SetPassword(name, password string) error {
 	if len(password) < 8 {
 		return fmt.Errorf("password must be at least 8 characters")
@@ -162,32 +162,9 @@ func (s *Store) SetPassword(name, password string) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.users[name]
-	if !ok {
-		return fmt.Errorf("user %q: %w", name, ErrNotFound)
-	}
-	prev, prevMust := u.Hash, u.MustChangePassword
-	u.Hash, u.MustChangePassword = hash, false
-	if err := s.saveUsers(); err != nil {
-		u.Hash, u.MustChangePassword = prev, prevMust
-		return err
-	}
-	return nil
-}
-
-// AddUserMustChange creates an account that is required to set a new password
-// before it can do anything else. Used for the bootstrap admin.
-func (s *Store) AddUserMustChange(name string, role Role, password string) (*User, error) {
-	u, err := s.AddUser(name, role, password)
-	if err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u.MustChangePassword = true
-	return u, s.saveUsers()
+	res, err := s.db.Exec(
+		`UPDATE users SET hash = ?, must_change_password = 0 WHERE name = ?`, hash, name)
+	return affectedOne(res, err, name)
 }
 
 // SetRole changes a user's role.
@@ -195,61 +172,43 @@ func (s *Store) SetRole(name string, role Role) error {
 	if !ValidRole(role) {
 		return fmt.Errorf("unknown role %q", role)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.users[name]
-	if !ok {
-		return fmt.Errorf("user %q: %w", name, ErrNotFound)
-	}
-	prev := u.Role
-	u.Role = role
-	if err := s.saveUsers(); err != nil {
-		u.Role = prev
-		return err
-	}
-	return nil
+	res, err := s.db.Exec(`UPDATE users SET role = ? WHERE name = ?`, role, name)
+	return affectedOne(res, err, name)
 }
 
-// DeleteUser removes an account. The last admin cannot be removed, since that
-// would leave the instance unadministrable.
+// DeleteUser removes an account. The last administrator cannot be removed,
+// since that would leave the instance unadministrable.
 func (s *Store) DeleteUser(name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.users[name]
-	if !ok {
-		return fmt.Errorf("user %q: %w", name, ErrNotFound)
-	}
-	if u.Role == RoleAdmin && s.countAdmins() == 1 {
-		return fmt.Errorf("refusing to delete the last admin account")
-	}
-	delete(s.users, name)
-	if err := s.saveUsers(); err != nil {
-		s.users[name] = u
-		return err
-	}
-	return nil
-}
-
-// countAdmins counts accounts that can actually administer the instance. A
-// pending account cannot, so it must not be what keeps the last real admin
-// deletable.
-func (s *Store) countAdmins() int {
-	n := 0
-	for _, u := range s.users {
-		if u.Role == RoleAdmin && !u.Pending {
-			n++
+	return s.tx(func(tx *sql.Tx) error {
+		var role Role
+		var pending bool
+		err := tx.QueryRow(`SELECT role, pending FROM users WHERE name = ?`, name).Scan(&role, &pending)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("user %q: %w", name, ErrNotFound)
+		} else if err != nil {
+			return err
 		}
-	}
-	return n
+		if role == RoleAdmin && !pending {
+			var others int
+			if err := tx.QueryRow(
+				`SELECT COUNT(*) FROM users WHERE role = ? AND pending = 0 AND name != ?`,
+				RoleAdmin, name).Scan(&others); err != nil {
+				return err
+			}
+			if others == 0 {
+				return fmt.Errorf("refusing to delete the last admin account")
+			}
+		}
+		_, err = tx.Exec(`DELETE FROM users WHERE name = ?`, name)
+		return err
+	})
 }
 
 // Authenticate returns the user if the password matches. The password is
-// verified even for unknown usernames so that response time does not reveal
-// which accounts exist.
+// verified even for unknown usernames, so response time does not reveal which
+// accounts exist.
 func (s *Store) Authenticate(name, password string) (*User, bool) {
-	s.mu.RLock()
-	u, ok := s.users[name]
-	s.mu.RUnlock()
+	u, ok := s.User(name)
 	if !ok {
 		verifyPassword("pbkdf2-sha256$600000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", password)
 		return nil, false
@@ -262,31 +221,80 @@ func (s *Store) Authenticate(name, password string) (*User, bool) {
 
 // User looks up an account by name.
 func (s *Store) User(name string) (*User, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	u, ok := s.users[name]
-	return u, ok
+	u, err := scanUser(s.db.QueryRow(`SELECT `+userColumns+` FROM users WHERE name = ?`, name))
+	if err != nil {
+		return nil, false
+	}
+	return u, true
 }
 
 // Users returns all accounts, ordered by name.
-func (s *Store) Users() []*User {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	list := make([]*User, 0, len(s.users))
-	for _, u := range s.users {
-		list = append(list, u)
+func (s *Store) Users() []*User { return s.usersWhere(`ORDER BY name`) }
+
+// PendingUsers returns accounts awaiting approval, oldest first.
+func (s *Store) PendingUsers() []*User {
+	return s.usersWhere(`WHERE pending = 1 ORDER BY created`)
+}
+
+func (s *Store) usersWhere(clause string) []*User {
+	rows, err := s.db.Query(`SELECT ` + userColumns + ` FROM users ` + clause)
+	if err != nil {
+		return nil
 	}
-	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
-	return list
+	defer rows.Close()
+	var out []*User
+	for rows.Next() {
+		u, err := scanUser(rows)
+		if err != nil {
+			return out
+		}
+		out = append(out, u)
+	}
+	return out
 }
 
 // UserCount reports how many accounts exist.
 func (s *Store) UserCount() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.users)
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
+	return n
 }
 
-// SessionKey is the value a session cookie is bound to. Including the password
-// hash means changing a password logs out that user everywhere.
-func (u *User) SessionKey() string { return u.Name + "\x00" + u.Hash }
+// ApproveUser clears the pending flag and sets the account's role.
+func (s *Store) ApproveUser(name string, role Role) error {
+	if !ValidRole(role) {
+		return fmt.Errorf("unknown role %q", role)
+	}
+	return s.tx(func(tx *sql.Tx) error {
+		var pending bool
+		err := tx.QueryRow(`SELECT pending FROM users WHERE name = ?`, name).Scan(&pending)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("user %q: %w", name, ErrNotFound)
+		} else if err != nil {
+			return err
+		}
+		if !pending {
+			return fmt.Errorf("%q is already approved", name)
+		}
+		_, err = tx.Exec(`UPDATE users SET pending = 0, role = ? WHERE name = ?`, role, name)
+		return err
+	})
+}
+
+func isUnique(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique")
+}
+
+func affectedOne(res sql.Result, err error, name string) error {
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("user %q: %w", name, ErrNotFound)
+	}
+	return nil
+}

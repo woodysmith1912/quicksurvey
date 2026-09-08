@@ -5,6 +5,7 @@
 //	quicksurvey user add|list|passwd|role|rm
 //	quicksurvey export -survey ID [-kind responses|summary]
 //	quicksurvey healthcheck
+//	quicksurvey backup -to FILE
 package main
 
 import (
@@ -51,6 +52,7 @@ func usage() error {
   quicksurvey user rm     -name NAME
   quicksurvey export      -survey ID [-kind responses|summary]
   quicksurvey healthcheck [-url URL]
+  quicksurvey backup      -to FILE
 
 The data directory comes from -data or $QS_DATA_DIR (default /data).`)
 }
@@ -68,6 +70,8 @@ func run(args []string) error {
 		return exportCmd(args[1:])
 	case "healthcheck":
 		return healthcheck(args[1:])
+	case "backup":
+		return backupCmd(args[1:])
 	case "-h", "--help", "help":
 		fmt.Println(usage())
 		return nil
@@ -205,6 +209,31 @@ func healthcheck(args []string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("%s: %s", *target, resp.Status)
 	}
+	return nil
+}
+
+// backupCmd writes a consistent copy of the database, safely, while the server
+// is still running. Copying the file by hand is not equivalent: a live database
+// has a write-ahead log beside it, and a plain copy can catch it mid-write.
+func backupCmd(args []string) error {
+	fs := flag.NewFlagSet("backup", flag.ExitOnError)
+	dir := fs.String("data", env("QS_DATA_DIR", "/data"), "data directory ($QS_DATA_DIR)")
+	to := fs.String("to", "", "file to write the backup to")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *to == "" {
+		return errors.New("-to is required")
+	}
+	st, err := openStore(*dir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	if err := st.BackupTo(*to); err != nil {
+		return err
+	}
+	fmt.Printf("wrote %s\n", *to)
 	return nil
 }
 

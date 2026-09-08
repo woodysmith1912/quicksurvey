@@ -18,13 +18,14 @@ func TestInviteRoundTrip(t *testing.T) {
 		t.Fatalf("token = %q, want a long random string", token)
 	}
 
-	// The secret must not be recoverable from what is stored.
-	raw, err := os.ReadFile(filepath.Join(s.Dir(), "invites.json"))
+	// The secret must not be recoverable from what is stored. Check the
+	// database bytes directly rather than trusting the schema.
+	raw, err := os.ReadFile(filepath.Join(s.Dir(), dbFile))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(raw), token) {
-		t.Error("invites.json contains the raw token; only a digest should be stored")
+		t.Error("the database contains the raw invitation token; only a digest should be stored")
 	}
 
 	got, ok := s.InviteByToken(token)

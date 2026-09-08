@@ -1,9 +1,11 @@
 package store
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -128,7 +130,9 @@ func TestVoterIDIsPerSurveyAndOpaque(t *testing.T) {
 func TestVoterIDDoesNotSurviveSecretLoss(t *testing.T) {
 	s := newStore(t)
 	before := s.VoterID("s1", "tok")
-	if err := os.Remove(filepath.Join(s.Dir(), "secret.key")); err != nil {
+
+	// Losing the instance key is the documented way voter identities break.
+	if _, err := s.db.Exec(`DELETE FROM meta WHERE key = 'secret'`); err != nil {
 		t.Fatal(err)
 	}
 	s2 := reopen(t, s)
@@ -172,15 +176,26 @@ func TestResponseReplacesRatherThanAccumulates(t *testing.T) {
 	sv := mustSurvey(t, s, "Pizza", "Tacos", "Salad")
 	v := s.VoterID(sv.ID, "browser-1")
 
-	if _, err := s.SaveResponse(sv.ID, v, []string{sv.Options[0].ID}, "first"); err != nil {
+	first, err := s.SaveResponse(sv.ID, v, []string{sv.Options[0].ID}, "first")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.SaveResponse(sv.ID, v, []string{sv.Options[1].ID, sv.Options[2].ID}, "second"); err != nil {
+	second, err := s.SaveResponse(sv.ID, v, []string{sv.Options[1].ID, sv.Options[2].ID}, "second")
+	if err != nil {
 		t.Fatal(err)
 	}
 	if n := s.Count(sv.ID); n != 1 {
 		t.Fatalf("respondents = %d, want 1 — a second submission must replace the first", n)
 	}
+	// The same person keeps the same response identity across an edit.
+	if second.ID != first.ID {
+		t.Errorf("response ID changed on update: %s -> %s", first.ID, second.ID)
+	}
+	if !second.Created.Equal(first.Created) || !second.Updated.After(first.Updated) &&
+		second.Updated.Equal(first.Updated) == false {
+		t.Errorf("created should be preserved and updated should move: %v -> %v", first, second)
+	}
+
 	got, _ := s.ResponseFor(sv.ID, v)
 	if len(got.Choices) != 2 || !got.Chose(sv.Options[1].ID) || got.Chose(sv.Options[0].ID) {
 		t.Errorf("choices = %v, want the second submission's", got.Choices)
@@ -189,13 +204,16 @@ func TestResponseReplacesRatherThanAccumulates(t *testing.T) {
 		t.Errorf("comment = %q, want %q", got.Comment, "second")
 	}
 
-	// The log keeps both records; the replay picks the last.
-	raw, err := os.ReadFile(filepath.Join(s.Dir(), "surveys", sv.ID, "responses.jsonl"))
-	if err != nil {
+	// Superseded answers are not retained: exactly one row, and its choices
+	// are only the current ones.
+	var choices int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM choices c JOIN responses r ON r.id = c.response_id
+		 WHERE r.survey_id = ?`, sv.ID).Scan(&choices); err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(strings.TrimSpace(string(raw)), "\n") + 1; n != 2 {
-		t.Errorf("log has %d lines, want 2 — the log is append-only", n)
+	if choices != 2 {
+		t.Errorf("stored choices = %d, want 2 — the replaced answer should leave nothing behind", choices)
 	}
 	if n := reopen(t, s).Count(sv.ID); n != 1 {
 		t.Errorf("after restart respondents = %d, want 1", n)
@@ -307,30 +325,128 @@ func TestDeleteSurveyRemovesResponses(t *testing.T) {
 	if _, ok := s.Survey(sv.ID); ok {
 		t.Error("survey still present after delete")
 	}
-	if _, err := os.Stat(filepath.Join(s.Dir(), "surveys", sv.ID)); !os.IsNotExist(err) {
-		t.Error("survey directory still on disk after delete")
+	// Options and responses must go with it, via ON DELETE CASCADE, rather
+	// than being orphaned rows that a later survey ID could collide with.
+	for _, table := range []string{"options", "responses"} {
+		var n int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM `+table+` WHERE survey_id = ?`, sv.ID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("%d rows left in %s after deleting the survey", n, table)
+		}
+	}
+	var orphans int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM choices c LEFT JOIN responses r ON r.id = c.response_id
+		 WHERE r.id IS NULL`).Scan(&orphans); err != nil {
+		t.Fatal(err)
+	}
+	if orphans != 0 {
+		t.Errorf("%d orphaned choice rows after deleting the survey", orphans)
 	}
 	if _, ok := reopen(t, s).Survey(sv.ID); ok {
 		t.Error("deleted survey came back after a restart")
 	}
 }
 
-func TestTornFinalLineIsSkippedNotFatal(t *testing.T) {
-	s := newStore(t)
-	sv := mustSurvey(t, s, "Pizza")
-	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "b1"), []string{sv.Options[0].ID}, ""); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(s.Dir(), "surveys", sv.ID, "responses.jsonl")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.WriteString(`{"id":"broken","voter":"b2","cho`) // simulates a kill mid-write
-	f.Close()
+// Two processes against one data directory is what Kubernetes will eventually
+// do to you: a rollout, or someone scaling to two replicas. Against the old
+// file-based store their writes interleaved and corrupted each other silently.
+// SQLite serialises them, so both succeed and nothing is lost.
+func TestTwoStoresOnOneDatabaseBothWriteSafely(t *testing.T) {
+	a := newStore(t)
+	sv := mustSurvey(t, a, "Pizza", "Tacos")
+	b := reopen(t, a) // a second process, same directory
 
-	s2 := reopen(t, s) // must not return an error
-	if n := s2.Count(sv.ID); n != 1 {
-		t.Errorf("respondents = %d, want 1 — the torn line should be skipped and the rest kept", n)
+	const each = 25
+	var wg sync.WaitGroup
+	errs := make(chan error, 2*each)
+	for i := range each {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			v := a.VoterID(sv.ID, fmt.Sprintf("a-%d", i))
+			if _, err := a.SaveResponse(sv.ID, v, []string{sv.Options[0].ID}, "from a"); err != nil {
+				errs <- err
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			v := b.VoterID(sv.ID, fmt.Sprintf("b-%d", i))
+			if _, err := b.SaveResponse(sv.ID, v, []string{sv.Options[1].ID}, "from b"); err != nil {
+				errs <- err
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent write failed: %v", err)
+	}
+
+	if n := a.Count(sv.ID); n != 2*each {
+		t.Errorf("respondents = %d, want %d — writes were lost", n, 2*each)
+	}
+	results, voters := b.Tally(sv.ID)
+	if voters != 2*each {
+		t.Errorf("tally sees %d respondents, want %d", voters, 2*each)
+	}
+	for _, r := range results {
+		if r.Votes != each {
+			t.Errorf("%s = %d votes, want %d", r.Option.Text, r.Votes, each)
+		}
+	}
+	// And the database is intact for a third reader.
+	if n := reopen(t, a).Count(sv.ID); n != 2*each {
+		t.Errorf("after reopening, respondents = %d, want %d", n, 2*each)
+	}
+}
+
+func TestBackupProducesAUsableDatabase(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.AddUser("alice", RoleAdmin, "password123"); err != nil {
+		t.Fatal(err)
+	}
+	sv := mustSurvey(t, s, "Pizza", "Tacos")
+	for _, who := range []string{"a", "b", "c"} {
+		if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, who), []string{sv.Options[0].ID}, "hi"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dst := filepath.Join(t.TempDir(), "backup", dbFile)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Taken while the store is open, which is the whole point.
+	if err := s.BackupTo(dst); err != nil {
+		t.Fatalf("BackupTo: %v", err)
+	}
+	if err := s.BackupTo(dst); err == nil {
+		t.Error("backing up over an existing file should be refused")
+	}
+
+	// The backup opens as an ordinary data directory with everything in it.
+	restored, err := Open(filepath.Dir(dst))
+	if err != nil {
+		t.Fatalf("opening the backup: %v", err)
+	}
+	defer restored.Close()
+
+	if _, ok := restored.Authenticate("alice", "password123"); !ok {
+		t.Error("the account did not survive the backup")
+	}
+	if n := restored.Count(sv.ID); n != 3 {
+		t.Errorf("responses in the backup = %d, want 3", n)
+	}
+	results, voters := restored.Tally(sv.ID)
+	if voters != 3 || results[0].Votes != 3 {
+		t.Errorf("tally in the backup = %+v (%d voters)", results, voters)
+	}
+	// And the instance key came too, so voter identities still resolve.
+	if restored.VoterID(sv.ID, "a") != s.VoterID(sv.ID, "a") {
+		t.Error("the instance key did not survive the backup; returning respondents would look new")
 	}
 }
