@@ -113,6 +113,26 @@ A respondent's vote for their own pending write-in is recorded immediately and
 starts counting the moment a moderator approves it — they do not have to come
 back.
 
+## Option order
+
+Respondents see the options shuffled, by default. Position bias is real — the
+option listed first collects votes for being first — and a survey meant to
+measure interest should not also measure list position.
+
+The shuffle is derived from the respondent's own per-survey identifier, not
+drawn fresh on each render. That is the part that matters: someone who reloads,
+or comes back to change their answer, must see the same order, or their existing
+ticks appear to move. Different people get different orders; each person keeps
+theirs for the life of their cookie.
+
+It is strictly a presentation concern. `Ballot` returns the editor's order and
+is what the admin pages, the tally and the exports use; `BallotFor` is the
+shuffled view and is used by exactly one caller, the respondent's page.
+
+The setting is stored inverted, as `NoRandomize`, so that the zero value means
+"shuffle". That makes the default apply to surveys written before the field
+existed, without a migration.
+
 ## Authentication
 
 Passwords are PBKDF2-HMAC-SHA256, 600,000 iterations, per-user salt, stored in a

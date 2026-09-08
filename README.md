@@ -132,6 +132,7 @@ two processes sharing a volume will lose writes.
 | Show the tally to respondents | Respondents see vote counts. Comments are never shown to them. |
 | Let respondents suggest options | A write-in goes into a moderation queue. Only the person who suggested it can see it until it is approved; their vote for it counts from the moment it is. |
 | Offer a comment box | One optional free-text field per response. Visible to accounts and in the export only. |
+| Show the options in a different order to each respondent | **On by default.** Whichever option is listed first collects extra votes for being first; shuffling spreads that bias out. Each person keeps their own order, so returning to change an answer does not move the boxes around. Results and exports are unaffected. |
 | Close automatically at | After this time the survey stops accepting responses. Leave blank to close it by hand. |
 
 ### Import into Google Sheets

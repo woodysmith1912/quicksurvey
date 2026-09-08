@@ -853,3 +853,98 @@ func TestOnlyAdminsCanInvite(t *testing.T) {
 		t.Error("the invitation was created anyway")
 	}
 }
+
+var optionOrderRe = regexp.MustCompile(`id="opt-([a-z0-9]+)"`)
+
+// ballotOrder reads the option IDs in the order the page presents them.
+func ballotOrder(body string) []string {
+	var out []string
+	for _, m := range optionOrderRe.FindAllStringSubmatch(body, -1) {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+func TestBallotOrderIsShuffledPerRespondentButStableForEachOne(t *testing.T) {
+	h := newHarness(t)
+	sv := h.seedSurvey("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel")
+	path := "/s/" + sv.ID
+
+	// One person's order does not move, across reloads or across submitting.
+	alice := h.browser()
+	first := ballotOrder(alice.get(path).body)
+	if len(first) != 8 {
+		t.Fatalf("got %d options on the ballot, want 8", len(first))
+	}
+	for range 5 {
+		if got := ballotOrder(alice.get(path).body); strings.Join(got, ",") != strings.Join(first, ",") {
+			t.Fatalf("a reload reshuffled the ballot:\n%v\n%v", first, got)
+		}
+	}
+	token := alice.csrf(path)
+	alice.follow(alice.post(path+"/vote", url.Values{"csrf": {token}, "choice": {first[0]}}))
+	if got := ballotOrder(alice.get(path).body); strings.Join(got, ",") != strings.Join(first, ",") {
+		t.Errorf("the order changed after voting; the respondent's ticks would appear to move")
+	}
+
+	// Different people get different orders.
+	seen := map[string]bool{strings.Join(first, ","): true}
+	for range 6 {
+		seen[strings.Join(ballotOrder(h.browser().get(path).body), ",")] = true
+	}
+	if len(seen) < 2 {
+		t.Error("every browser saw the same order; the ballot is not being randomised")
+	}
+}
+
+func TestRandomizeCanBeTurnedOffPerSurvey(t *testing.T) {
+	h := newHarness(t)
+	sv := h.seedSurvey("Alpha", "Bravo", "Charlie", "Delta", "Echo")
+	if _, err := h.st.UpdateSurvey(sv.ID, func(d *store.Survey) error { d.NoRandomize = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	want := make([]string, len(sv.Options))
+	for i, o := range sv.Options {
+		want[i] = o.ID
+	}
+	for range 5 {
+		got := ballotOrder(h.browser().get("/s/" + sv.ID).body)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("with randomising off, order = %v, want the editor's order %v", got, want)
+		}
+	}
+}
+
+func TestEditFormTogglesRandomising(t *testing.T) {
+	h := newHarness(t)
+	sv := h.seedSurvey("Alpha", "Bravo")
+	pw := h.seedUser("eve", store.RoleEditor)
+	editor := h.browser()
+	editor.login("eve", pw)
+	editPath := "/admin/s/" + sv.ID + "/edit"
+
+	// The box is ticked to begin with, because the default is on.
+	if !regexp.MustCompile(`name="randomize" value="1"\s+checked`).MatchString(editor.get(editPath).body) {
+		t.Error("the randomise box should start ticked, since randomising is the default")
+	}
+
+	// Saving without it turns randomising off.
+	token := editor.csrf(editPath)
+	editor.follow(editor.post(editPath, url.Values{
+		"csrf": {token}, "title": {sv.Title}, "allow_comment": {"1"},
+	}))
+	got, _ := h.st.Survey(sv.ID)
+	if got.Randomize() {
+		t.Error("unticking the box did not turn randomising off")
+	}
+
+	// And saving with it turns it back on.
+	token = editor.csrf(editPath)
+	editor.follow(editor.post(editPath, url.Values{
+		"csrf": {token}, "title": {sv.Title}, "randomize": {"1"},
+	}))
+	got, _ = h.st.Survey(sv.ID)
+	if !got.Randomize() {
+		t.Error("ticking the box did not turn randomising back on")
+	}
+}

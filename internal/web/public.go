@@ -51,14 +51,16 @@ func (s *Server) handleBallot(w http.ResponseWriter, r *http.Request) {
 
 	d := ballotData{Survey: sv, Selected: map[string]bool{},
 		Accepting: sv.AcceptingFrom(time.Now(), preview), Preview: preview}
+	// Seed the shuffle with the respondent's own identifier, so their order is
+	// fixed across reloads and edits but unrelated to anyone else's.
 	if prev, ok := s.store.ResponseFor(sv.ID, voter); ok {
 		d.Responded, d.Comment = true, prev.Comment
 		for _, id := range prev.Choices {
 			d.Selected[id] = true
 		}
-		d.Options = sv.Ballot(prev.Choices)
+		d.Options = sv.BallotFor(prev.Choices, voter)
 	} else {
-		d.Options = sv.Ballot(nil)
+		d.Options = sv.BallotFor(nil, voter)
 	}
 	if sv.ShowResults {
 		d.Results, d.Voters = s.store.Tally(sv.ID)

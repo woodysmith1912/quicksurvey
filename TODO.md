@@ -10,6 +10,9 @@
       their own account and lands in an approval queue, where an existing admin
       approves them with a role of the approver's choosing, or rejects them.
 
+- [x] Options are shown in a different order to each respondent, on by default,
+      stable per person so returning to edit an answer does not move the boxes.
+
 ## Done and verified by tests
 - [x] `internal/store` — file-backed store, atomic definition writes, HMAC key
 - [x] Accounts: PBKDF2-SHA256, viewer/editor/admin, last-admin protection
@@ -25,13 +28,13 @@
 - [x] `cmd/quicksurvey` — `serve`, `user`, `export`; bootstrap admin on first start
 - [x] Dockerfile, compose file, Makefile
 - [x] README.md, DESIGN.md
-- [x] Go tests: 68 across `internal/store`, `internal/export`, `internal/web` — `make test`
+- [x] Go tests: 77 across `internal/store`, `internal/export`, `internal/web` — `make test`
 - [x] Playwright specs: respondent, write-in/moderation, admin, accounts,
       splash, draft preview, invitations
 
 ## Verified on this machine
-- [x] `make test` — 68 Go tests, green
-- [x] `make e2e-docker` — 30 Playwright tests, green, 34s, nothing installed on
+- [x] `make test` — 77 Go tests, green
+- [x] `make e2e-docker` — 33 Playwright tests, green, 40s, nothing installed on
       the host. Slowest single test 1.8s; every interaction capped at 3s.
 - [x] Image builds distroless and runs read-only as uid 65532; Docker reports
       the container healthy via `quicksurvey healthcheck`
