@@ -1,8 +1,10 @@
 # QuickSurvey — development TODO
 
 ## Next
-- [ ] Publish the image to `ghcr.io/woodysmith1912/quicksurvey` and make the
-      package public — this cluster has no registry pull secrets.
+- [ ] Push to GitHub. CI publishes the image automatically; then make the GHCR
+      package public, because this cluster has no registry pull secrets.
+- [ ] Tag `v0.1.0` and push the tag — the manifests pin that version, and a
+      push to `main` alone only publishes `main` and `sha-` tags.
 - [ ] Point `quicksurveys.plainwrapworks.com` at `<LB-IP>` before applying, or
       Traefik's TLS-ALPN challenge cannot resolve the host.
 - [ ] Traefik in this cluster stores `acme.json` inside its container with no
@@ -38,6 +40,8 @@
 - [x] `cmd/quicksurvey` — `serve`, `user`, `export`; bootstrap admin on first start
 - [x] `quicksurvey backup` via `VACUUM INTO` — safe against a live instance
 - [x] Dockerfile, compose file, Makefile
+- [x] GitHub Actions: fmt, vet, `go test -race`, Playwright, manifest render,
+      then publish to GHCR with a provenance attestation
 - [x] Kubernetes manifests for DOKS (`deploy/k8s`): StatefulSet on a Retain
       block-storage volume, Traefik Ingress with automatic Let's Encrypt,
       app-level HTTPS redirect, nightly CSI VolumeSnapshots with retention

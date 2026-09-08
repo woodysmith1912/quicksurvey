@@ -1,0 +1,221 @@
+# Build, test, and publish the container image.
+#
+# Nothing is published unless the Go tests, the browser tests and the manifest
+# render all pass first: the publish job needs: all three, so a failure in any
+# one of them stops the push rather than shipping past it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push to the same branch makes an in-flight run pointless. Tags are
+  # never cancelled — a release build should always finish.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  test:
+    name: Go tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would change these files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # -race because the store is reached concurrently by every request, and
+      # the two-writers-on-one-database test is exactly where a data race would
+      # hide.
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  e2e:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      # The Playwright config builds and launches the binary itself when
+      # QS_E2E_BASE_URL is unset, which is the faster path in CI. The
+      # containerised path (make e2e-docker) tests the same code through more
+      # moving parts.
+      - name: Build
+        run: make build
+
+      - name: Install Playwright
+        working-directory: e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run
+        working-directory: e2e
+        run: npx playwright test
+
+      - name: Upload report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report
+            e2e/test-results
+          retention-days: 7
+
+  manifests:
+    name: Kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Renders without a cluster. Catches the things that are easy to get
+      # wrong by hand: a bad replacements path, a field that does not exist,
+      # YAML that parses but means nothing.
+      - name: Ensure kubectl
+        run: |
+          command -v kubectl >/dev/null && exit 0
+          v=$(curl -sSL https://dl.k8s.io/release/stable.txt)
+          curl -sSLo /tmp/kubectl "https://dl.k8s.io/release/$v/bin/linux/amd64/kubectl"
+          sudo install -m0755 /tmp/kubectl /usr/local/bin/kubectl
+
+      - name: Render
+        run: kubectl kustomize deploy/k8s > /tmp/rendered.yaml
+
+      - name: Check the hostname reached QS_BASE_URL
+        run: |
+          if grep -q 'REPLACED-FROM-INGRESS' /tmp/rendered.yaml; then
+            echo "::error::the kustomize replacement did not fire; QS_BASE_URL is still a placeholder"
+            exit 1
+          fi
+          host=$(grep -m1 -E '^[[:space:]]+- host:' /tmp/rendered.yaml | awk '{print $3}')
+          [ -n "$host" ] || { echo "::error::no Ingress host found in the rendered manifests"; exit 1; }
+          grep -q "https://$host" /tmp/rendered.yaml || {
+            echo "::error::QS_BASE_URL does not match the Ingress host ($host)"
+            exit 1
+          }
+          echo "Ingress host and QS_BASE_URL agree: $host"
+
+  publish:
+    name: Publish image
+    needs: [test, e2e, manifests]
+    # Pull requests build the image to prove the Dockerfile still works, but
+    # only pushes to main and version tags publish one.
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # sha- tags are the immutable ones; that is what a StatefulSet should
+          # reference. "latest" moves only on a version tag, never on a push to
+          # main, so it cannot quietly become an untested commit.
+          tags: |
+            type=ref,event=branch
+            type=sha,format=long
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # The cluster's nodes are amd64. Adding arm64 means QEMU and roughly
+          # triple the build time for an architecture nothing here runs.
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Lets anyone verify the image was built from this repo, by this workflow:
+      #   gh attestation verify oci://ghcr.io/OWNER/quicksurvey:TAG --repo OWNER/quicksurvey
+      # Worth having for software whose whole claim is that you can check what
+      # it does with your data.
+      - name: Attest provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo
+            echo "Digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Pull requests get the Dockerfile exercised without publishing anything.
+  build-only:
+    name: Build image (no publish)
+    needs: [test, e2e, manifests]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha

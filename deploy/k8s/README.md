@@ -19,11 +19,42 @@ Do this *before* applying. Traefik obtains certificates by TLS-ALPN challenge,
 which resolves the hostname, and Let's Encrypt rate-limits failed validations at
 5 per hostname per hour — applying against dead DNS spends those for nothing.
 
-**2. Publish the image.** The manifests reference
-`ghcr.io/woodysmith1912/quicksurvey:v0.1.0`. Nothing in this cluster uses a
-private registry or an `imagePullSecret`, so the package has to be public —
-GHCR creates them private by default, and a private one fails with
-`ImagePullBackOff` and an unhelpful message.
+**2. Publish the image.** `.github/workflows/ci.yaml` builds and pushes to
+`ghcr.io/woodysmith1912/quicksurvey`, but only after the Go tests, the browser
+tests and the manifest render all pass.
+
+Which tag it publishes depends on what you pushed:
+
+| You push | CI publishes |
+|---|---|
+| a commit to `main` | `main`, `sha-<full-sha>` |
+| a tag `v0.1.0` | `v0.1.0`, `0.1`, `latest`, `sha-<full-sha>` |
+
+The manifests pin `v0.1.0`, which exists only once you have pushed that git
+tag:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+To deploy an untagged commit instead, point `newTag` in `kustomization.yaml` at
+its `sha-<full-sha>`. Prefer either of those to `latest` or `main`: a moving tag
+gives you no way to know what is running or to roll back. `latest` deliberately
+moves only on a version tag, never on a push to `main`, so it cannot quietly
+become an untested commit.
+
+**The package must be public.** Nothing in this cluster uses a private registry
+or an `imagePullSecret`. GHCR creates packages private on first push — find it
+under your GitHub profile → Packages → quicksurvey → Package settings → Change
+visibility. A private one fails as `ImagePullBackOff` with an unhelpful message.
+
+The image carries a build provenance attestation, so you can check where it came
+from:
+
+```sh
+gh attestation verify oci://ghcr.io/woodysmith1912/quicksurvey:v0.1.0 \
+  --repo woodysmith1912/quicksurvey
+```
 
 **3. Get the first password.** On first start with no accounts, the app creates
 `admin` with a random password and prints it once:

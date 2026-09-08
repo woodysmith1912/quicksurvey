@@ -242,6 +242,17 @@ The instance's HMAC key lives in the database, so a backup carries it. Losing it
 invalidates every session and every voter cookie: existing responses survive,
 but returning respondents look like new people and can vote again.
 
+## Continuous integration
+
+[`.github/workflows/ci.yaml`](.github/workflows/ci.yaml) runs on every push to
+`main`, every version tag and every pull request. Nothing is published unless
+the Go tests, the browser tests and the Kubernetes manifest render all pass —
+the publish job depends on all three.
+
+Pull requests build the image without pushing it, so a broken Dockerfile is
+caught without shipping anything. Published images carry a build provenance
+attestation.
+
 ## Tests
 
 ```sh
