@@ -11,8 +11,9 @@ kubectl apply -k deploy/k8s
 
 **1. Point DNS at Traefik.** `quicksurveys.plainwrapworks.com` must resolve to
 `<LB-IP>` — the `traefik-ingress-service` LoadBalancer. See
-[../dns.md](../dns.md); the zone is at the registrar, not DigitalOcean, so the
-records are entered by hand.
+[../dns.md](../dns.md); the zone is in DigitalOcean and the records already
+exist, but the delegation at the registrar still has to be pointed at
+`ns1/ns2/ns3.digitalocean.com`.
 
 Do this *before* applying. Traefik obtains certificates by TLS-ALPN challenge,
 which resolves the hostname, and Let's Encrypt rate-limits failed validations at
