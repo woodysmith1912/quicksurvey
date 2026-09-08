@@ -137,6 +137,7 @@ func (s *Server) handleEditSave(w http.ResponseWriter, r *http.Request) {
 		sv.ShowResults = r.FormValue("show_results") != ""
 		sv.AllowWriteIn = r.FormValue("allow_write_in") != ""
 		sv.AllowComment = r.FormValue("allow_comment") != ""
+		sv.NoRandomize = r.FormValue("randomize") == ""
 		sv.CloseAt = closeAt
 
 		// Existing options: rename, remove, or restore. Pending write-ins are

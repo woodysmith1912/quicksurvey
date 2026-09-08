@@ -13,6 +13,9 @@
     <p class="hint">The link does not work for anyone else until you publish the survey. You can open it
       yourself to try the survey as a respondent would; those test responses are discarded when you publish.</p>
   {{end}}
+  {{if $d.Survey.Randomize}}
+    <p class="hint" data-testid="randomized-note">Each respondent sees the options in their own order.</p>
+  {{end}}
   {{if not $d.Survey.CloseAt.IsZero}}
     <p class="hint">Scheduled to close {{localtime $d.Survey.CloseAt}}{{if $d.Overdue}} — already past, so it is no longer accepting responses{{end}}.</p>
   {{end}}

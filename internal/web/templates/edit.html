@@ -42,6 +42,11 @@
       data-testid="allow-writein"> Let respondents suggest options (moderated before they appear)</label>
     <label><input type="checkbox" name="allow_comment" value="1" {{if $d.Survey.AllowComment}}checked{{end}}
       data-testid="allow-comment"> Offer a free-text comment box</label>
+    <label><input type="checkbox" name="randomize" value="1" {{if $d.Survey.Randomize}}checked{{end}}
+      data-testid="randomize"> Show the options in a different order to each respondent</label>
+    <p class="hint">On by default. Whichever option is listed first collects extra votes simply for being
+      first; shuffling spreads that bias out. Each person keeps their own order, so coming back to change
+      an answer does not move the boxes around. Results and exports are unaffected.</p>
     <label for="close_at">Close automatically at (optional)</label>
     <input id="close_at" name="close_at" type="datetime-local"
       value="{{datetimeLocal $d.Survey.CloseAt}}" data-testid="close-at">

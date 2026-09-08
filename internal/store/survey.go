@@ -1,8 +1,10 @@
 package store
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
@@ -55,6 +57,13 @@ type Survey struct {
 	ShowResults  bool     `json:"show_results"` // respondents see the tally
 	AllowWriteIn bool     `json:"allow_write_in"`
 	AllowComment bool     `json:"allow_comment"`
+	// NoRandomize turns off per-respondent shuffling of the options.
+	//
+	// Stored inverted, and read through Randomize, so that the zero value
+	// means "shuffle". Randomising is the default because the order options
+	// are listed measurably biases which ones get picked, and a survey stored
+	// before this field existed should get the better behaviour too.
+	NoRandomize bool `json:"no_randomize,omitempty"`
 	// CloseAt, if non-zero, is the instant after which the survey stops
 	// accepting responses without anyone having to flip the state. Stored in
 	// UTC; entered and displayed in the server's configured location.
@@ -100,6 +109,9 @@ func (s *Survey) ClosedByClock(now time.Time) bool {
 	return s.State == StateOpen && !s.CloseAt.IsZero() && !now.Before(s.CloseAt)
 }
 
+// Randomize reports whether respondents should see the options shuffled.
+func (s *Survey) Randomize() bool { return !s.NoRandomize }
+
 // Option looks up an option by ID.
 func (s *Survey) Option(id string) (Option, bool) {
 	for _, o := range s.Options {
@@ -128,8 +140,9 @@ func (s *Survey) Resolve(id string) (string, bool) {
 	return id, false
 }
 
-// Ballot returns the options to show a respondent: approved ones in order,
-// followed by this respondent's own pending write-ins.
+// Ballot returns the options to show a respondent in the order the editor
+// wrote them: approved ones first, followed by this respondent's own pending
+// write-ins. BallotFor is what respondents actually get.
 func (s *Survey) Ballot(pending []string) []Option {
 	out := make([]Option, 0, len(s.Options))
 	for _, o := range s.Options {
@@ -143,6 +156,31 @@ func (s *Survey) Ballot(pending []string) []Option {
 		}
 	}
 	return out
+}
+
+// BallotFor is Ballot, shuffled for one respondent when the survey randomises.
+//
+// The shuffle is derived from seed — in practice the respondent's per-survey
+// identifier — rather than being drawn fresh on each render. That matters:
+// someone who reloads the page, or comes back to change their answer, must see
+// the same order, or their existing ticks appear to move around. Different
+// people get different orders; the same person always gets theirs.
+//
+// A respondent's own pending write-ins stay at the end, where they were added.
+func (s *Survey) BallotFor(pending []string, seed string) []Option {
+	approved := s.Ballot(nil)
+	if s.Randomize() && len(approved) > 1 {
+		r := rand.New(rand.NewChaCha8(sha256.Sum256([]byte(seed))))
+		r.Shuffle(len(approved), func(i, j int) {
+			approved[i], approved[j] = approved[j], approved[i]
+		})
+	}
+	for _, id := range pending {
+		if o, ok := s.Option(id); ok && o.Status == OptPending {
+			approved = append(approved, o)
+		}
+	}
+	return approved
 }
 
 // PendingOptions returns write-ins awaiting moderation, oldest first.
