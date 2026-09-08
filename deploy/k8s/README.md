@@ -10,10 +10,13 @@ kubectl apply -k deploy/k8s
 ## Before you apply
 
 **1. Point DNS at Traefik.** `quicksurveys.plainwrapworks.com` must resolve to
-`<LB-IP>` — the `traefik-ingress-service` LoadBalancer. Traefik obtains
-certificates by TLS-ALPN challenge, which resolves the hostname, so issuance
-fails until DNS is live. Applying early is harmless; it just will not get a
-certificate until you do.
+`<LB-IP>` — the `traefik-ingress-service` LoadBalancer. See
+[../dns.md](../dns.md); the zone is at the registrar, not DigitalOcean, so the
+records are entered by hand.
+
+Do this *before* applying. Traefik obtains certificates by TLS-ALPN challenge,
+which resolves the hostname, and Let's Encrypt rate-limits failed validations at
+5 per hostname per hour — applying against dead DNS spends those for nothing.
 
 **2. Publish the image.** The manifests reference
 `ghcr.io/woodysmith1912/quicksurvey:v0.1.0`. Nothing in this cluster uses a
