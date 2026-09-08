@@ -68,8 +68,12 @@ spec:
             # Used for the shareable link shown to editors. Without it the link
             # is rebuilt from proxy headers, which is usually right and
             # occasionally embarrassing.
+            #
+            # Kustomize overwrites this from the Ingress host, so the hostname
+            # is written in exactly one place. Drift here is quiet and nasty:
+            # editors get handed a link that does not resolve.
             - name: QS_BASE_URL
-              value: https://survey.plainwrapworks.com
+              value: https://REPLACED-FROM-INGRESS
             - name: QS_TZ
               value: America/New_York
             # Traefik terminates TLS, so cookies must be marked Secure.
