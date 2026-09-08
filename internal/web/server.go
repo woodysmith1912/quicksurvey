@@ -27,6 +27,12 @@ type Config struct {
 	// SecureCookies marks cookies Secure. Leave true unless serving plain
 	// HTTP on a trusted network, where the browser would otherwise drop them.
 	SecureCookies bool
+	// RedirectHTTPS sends plain-HTTP requests to the https:// equivalent,
+	// based on X-Forwarded-Proto. Needed when the proxy in front serves both
+	// :80 and :443 without redirecting itself: Secure cookies are not sent
+	// over http://, so a visitor arriving there cannot sign in or vote and
+	// gets no explanation.
+	RedirectHTTPS bool
 	// Location is the timezone used to display and enter times.
 	Location *time.Location
 	Logger   *slog.Logger
@@ -58,12 +64,29 @@ func New(st *store.Store, cfg Config) (*Server, error) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.RedirectHTTPS && !s.isHTTPS(r) {
+		// 308 rather than 302: the method and body must survive, or a POSTed
+		// vote would silently become a GET.
+		http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusPermanentRedirect)
+		return
+	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
 	// No third-party assets are loaded, so the policy can be this tight.
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 	s.mux.ServeHTTP(w, r)
+}
+
+// isHTTPS reports whether the request reached the proxy over TLS. The health
+// check is exempt: kubelet probes the pod directly over plain HTTP, and
+// redirecting them would fail every probe.
+func (s *Server) isHTTPS(r *http.Request) bool {
+	if r.TLS != nil || r.URL.Path == "/healthz" {
+		return true
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	return strings.EqualFold(strings.TrimSpace(strings.Split(proto, ",")[0]), "https")
 }
 
 func (s *Server) routes() {

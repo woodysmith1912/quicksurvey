@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: quicksurvey
+  namespace: quicksurvey
+  labels:
+    app.kubernetes.io/name: quicksurvey
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: quicksurvey
+  ports:
+    # Named "web" because that is how every other Ingress in this cluster
+    # references its backend.
+    - name: web
+      port: 80
+      targetPort: http
+      protocol: TCP

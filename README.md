@@ -47,6 +47,7 @@ uses.
 | `-base-url` | `QS_BASE_URL` | derived | External origin, e.g. `https://survey.example.com`. Used for the shareable link shown to editors. Derived from `Host` / `X-Forwarded-*` if unset. |
 | `-tz` | `QS_TZ` | `Local` | Timezone for displaying and entering times, e.g. `America/New_York`. |
 | `-secure-cookies` | `QS_SECURE_COOKIES` | `true` | Mark cookies `Secure`. Set false only for plain HTTP. |
+| `-redirect-https` | `QS_REDIRECT_HTTPS` | `false` | Redirect plain HTTP to https, from `X-Forwarded-Proto`. Turn on when the proxy serves `:80` without redirecting itself — `Secure` cookies are not sent over `http://`, so visitors arriving there cannot sign in or vote. `/healthz` is exempt so probes still work. |
 
 ## The container
 
@@ -90,6 +91,18 @@ QS_NNP=1 make up
 
 Little is lost without it: the image is distroless and contains no setuid or
 setgid binary for a process to escalate through.
+
+## Kubernetes
+
+Manifests for DigitalOcean Kubernetes are in [deploy/k8s](deploy/k8s), with the
+reasoning in [deploy/k8s/README.md](deploy/k8s/README.md).
+
+```sh
+kubectl apply -k deploy/k8s
+```
+
+StatefulSet with one replica, a `Retain` block-storage volume, Traefik `Ingress`
+with automatic Let's Encrypt, and a nightly CSI `VolumeSnapshot` for backups.
 
 ## Deployment
 

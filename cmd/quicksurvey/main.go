@@ -114,6 +114,8 @@ func serve(args []string) error {
 	tzName := fs.String("tz", env("QS_TZ", "Local"), "timezone for displaying and entering times ($QS_TZ)")
 	secure := fs.Bool("secure-cookies", envBool("QS_SECURE_COOKIES", true),
 		"mark cookies Secure; set false only when serving plain HTTP ($QS_SECURE_COOKIES)")
+	redirect := fs.Bool("redirect-https", envBool("QS_REDIRECT_HTTPS", false),
+		"redirect plain-HTTP requests to https, using X-Forwarded-Proto ($QS_REDIRECT_HTTPS)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -133,7 +135,8 @@ func serve(args []string) error {
 	}
 
 	srv, err := web.New(st, web.Config{
-		BaseURL: *baseURL, SecureCookies: *secure, Location: loc, Logger: log,
+		BaseURL: *baseURL, SecureCookies: *secure, RedirectHTTPS: *redirect,
+		Location: loc, Logger: log,
 	})
 	if err != nil {
 		return err
@@ -157,7 +160,8 @@ func serve(args []string) error {
 		_ = httpSrv.Shutdown(shutdown)
 	}()
 
-	log.Info("listening", "addr", *addr, "data", *dir, "tz", loc.String(), "secure_cookies", *secure)
+	log.Info("listening", "addr", *addr, "data", *dir, "tz", loc.String(),
+		"secure_cookies", *secure, "redirect_https", *redirect)
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
