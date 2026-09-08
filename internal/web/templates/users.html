@@ -1,0 +1,153 @@
+{{define "content"}}
+<h1>Accounts</h1>
+<p class="hint">Accounts exist only to manage surveys. Respondents never sign in and are never linked to an account.</p>
+
+{{with .Data.NewInvite}}
+<div class="card">
+  <h2>New invitation link</h2>
+  <p class="hint">Copy it now — it is shown once and cannot be retrieved again. Anyone with the link can
+    request an account; you still have to approve them.</p>
+  <code class="url" data-testid="invite-url">{{.}}</code>
+</div>
+{{end}}
+
+{{if .Data.Pending}}
+<div class="card">
+  <h2>Waiting for approval <span class="muted">({{len .Data.Pending}})</span></h2>
+  <table data-testid="pending-users">
+    <thead><tr><th>User</th><th>Invited by</th><th>Approve as</th><th></th></tr></thead>
+    <tbody>
+    {{range .Data.Pending}}
+    <tr data-testid="pending-user" data-user="{{.Name}}">
+      <td>{{.Name}}<div class="muted">requested {{localtime .Created}}</div></td>
+      <td class="muted">{{.InvitedBy}}</td>
+      <td>
+        <form method="post" action="/admin/users" class="row">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="username" value="{{.Name}}">
+          <select name="role" aria-label="Role for {{.Name}}" data-testid="approve-role">
+            <option value="viewer" {{if eq (printf "%s" .Role) "viewer"}}selected{{end}}>viewer</option>
+            <option value="editor" {{if eq (printf "%s" .Role) "editor"}}selected{{end}}>editor</option>
+            <option value="admin" {{if eq (printf "%s" .Role) "admin"}}selected{{end}}>admin</option>
+          </select>
+          <button class="primary" name="action" value="approve" type="submit" data-testid="approve-user">Approve</button>
+        </form>
+      </td>
+      <td>
+        <form method="post" action="/admin/users" class="inline">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="username" value="{{.Name}}">
+          <button class="danger" name="action" value="reject" type="submit" data-testid="reject-user">Reject</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
+
+<h2>Accounts</h2>
+<table data-testid="user-list">
+  <thead><tr><th>User</th><th>Role</th><th>Actions</th></tr></thead>
+  <tbody>
+  {{range .Data.Users}}
+  <tr data-testid="user-row" data-user="{{.Name}}">
+    <td>{{.Name}}<div class="muted">since {{localtime .Created}}</div></td>
+    <td>
+      <form method="post" action="/admin/users" class="row">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <input type="hidden" name="action" value="role">
+        <input type="hidden" name="username" value="{{.Name}}">
+        <select name="role" aria-label="Role for {{.Name}}" data-testid="role-select">
+          <option value="viewer" {{if eq (printf "%s" .Role) "viewer"}}selected{{end}}>viewer</option>
+          <option value="editor" {{if eq (printf "%s" .Role) "editor"}}selected{{end}}>editor</option>
+          <option value="admin" {{if eq (printf "%s" .Role) "admin"}}selected{{end}}>admin</option>
+        </select>
+        <button type="submit">Set</button>
+      </form>
+    </td>
+    <td>
+      <form method="post" action="/admin/users" class="row">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <input type="hidden" name="username" value="{{.Name}}">
+        <input name="password" type="password" placeholder="new password" autocomplete="new-password">
+        <button name="action" value="password" type="submit">Reset password</button>
+        <button class="danger" name="action" value="delete" type="submit" data-testid="delete-user">Delete</button>
+      </form>
+    </td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+
+<div class="card">
+  <h2>Invite someone by link</h2>
+  <p class="hint">Send them a link instead of choosing a password on their behalf. They create the account
+    themselves and land in the approval queue above.</p>
+  <form method="post" action="/admin/invites">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="action" value="create">
+    <label for="inv-role">Suggested role</label>
+    <select id="inv-role" name="role" data-testid="invite-role">
+      <option value="viewer">viewer — see results and download exports</option>
+      <option value="editor" selected>editor — also create, edit and moderate surveys</option>
+      <option value="admin">admin — also manage accounts</option>
+    </select>
+    <label for="inv-note">Note (shown to them, optional)</label>
+    <input id="inv-note" name="note" type="text" maxlength="120" data-testid="invite-note">
+    <label for="inv-days">Link valid for</label>
+    <select id="inv-days" name="days" data-testid="invite-days">
+      <option value="24">1 day</option>
+      <option value="168" selected>7 days</option>
+      <option value="720">30 days</option>
+    </select>
+    <p><button class="primary" type="submit" data-testid="create-invite">Create invitation link</button></p>
+  </form>
+</div>
+
+{{if .Data.Invites}}
+<div class="card">
+  <h2>Invitation links</h2>
+  <table data-testid="invite-list">
+    <thead><tr><th>Created</th><th>Role</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {{range .Data.Invites}}
+    <tr data-testid="invite-row" data-invite="{{.ID}}">
+      <td>{{localtime .Created}}<div class="muted">by {{.CreatedBy}}{{if .Note}} — {{.Note}}{{end}}</div></td>
+      <td class="muted">{{.Role}}</td>
+      <td class="muted" data-testid="invite-status">{{.Status $.Data.Now}}</td>
+      <td>{{if .Open $.Data.Now}}
+        <form method="post" action="/admin/invites" class="inline">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="action" value="revoke">
+          <input type="hidden" name="id" value="{{.ID}}">
+          <button class="link" type="submit" data-testid="revoke-invite">revoke</button>
+        </form>
+      {{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+</div>
+{{end}}
+
+<div class="card">
+  <h2>Add an account directly</h2>
+  <form method="post" action="/admin/users">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="action" value="add">
+    <label for="u">Username</label>
+    <input id="u" name="username" type="text" required data-testid="new-username">
+    <label for="p">Password</label>
+    <input id="p" name="password" type="password" minlength="8" required autocomplete="new-password" data-testid="new-password">
+    <label for="r">Role</label>
+    <select id="r" name="role" data-testid="new-role">
+      <option value="viewer">viewer — see results and download exports</option>
+      <option value="editor" selected>editor — also create, edit and moderate surveys</option>
+      <option value="admin">admin — also manage accounts</option>
+    </select>
+    <p><button class="primary" type="submit" data-testid="add-user">Add account</button></p>
+  </form>
+</div>
+{{end}}

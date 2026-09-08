@@ -1,0 +1,23 @@
+{{define "content"}}
+{{$d := .Data}}
+<h1>Create your account</h1>
+<p>You were invited by <strong data-testid="invite-inviter">{{$d.Invite.CreatedBy}}</strong>{{if $d.Invite.Note}}
+  — <span data-testid="invite-note-shown">{{$d.Invite.Note}}</span>{{end}}.</p>
+<p class="hint">Pick a username and password. An existing administrator reviews the request before
+  the account can do anything; the role suggested for you is <strong data-testid="invite-suggested-role">{{$d.Invite.Role}}</strong>.</p>
+
+<form method="post" action="/invite/{{$d.Token}}" class="card">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="username">Username</label>
+  <input id="username" name="username" type="text" autocomplete="username" required
+         value="{{$d.Name}}" data-testid="invite-username">
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="new-password" minlength="8" required
+         data-testid="invite-password">
+  <p class="hint">At least 8 characters.</p>
+  <label for="confirm">Repeat password</label>
+  <input id="confirm" name="confirm" type="password" autocomplete="new-password" minlength="8" required
+         data-testid="invite-confirm">
+  <p><button class="primary" type="submit" data-testid="invite-submit">Request an account</button></p>
+</form>
+{{end}}

@@ -1,0 +1,20 @@
+# Opt-in overlay adding no-new-privileges to every service.
+#
+# Use it only on a host where it actually works. It does NOT work under
+# snap-packaged Docker: the daemon runs under the AppArmor profile
+# snap.docker.dockerd, so each container start needs a profile transition at
+# execve, which no_new_privs forbids. The symptom is every container exiting
+# immediately with "operation not permitted".
+#
+# Check before enabling:
+#     docker run --rm --security-opt no-new-privileges:true alpine echo ok
+#
+#     docker compose -f compose.yaml -f compose.no-new-privileges.yaml up -d
+# or: QS_NNP=1 make up
+services:
+  quicksurvey:
+    security_opt: [no-new-privileges:true]
+  quicksurvey-test-init:
+    security_opt: [no-new-privileges:true]
+  quicksurvey-test:
+    security_opt: [no-new-privileges:true]

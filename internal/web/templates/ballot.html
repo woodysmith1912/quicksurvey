@@ -1,0 +1,63 @@
+{{define "content"}}
+{{$d := .Data}}
+{{if $d.Preview}}
+<p class="flash flash-error" data-testid="preview-banner">Preview — this survey is still a draft, so nobody else can
+  open this link. Try it exactly as a respondent would: anything you record now is test data, and is discarded
+  when you publish.</p>
+{{end}}
+
+<h1 data-testid="survey-title">{{$d.Survey.Title}}</h1>
+{{with $d.Survey.Description}}<p>{{.}}</p>{{end}}
+
+{{if $d.Accepting}}
+  <p class="hint">Give a thumbs-up to everything you are interested in — as many or as few as you like.
+  {{if $d.Responded}}Your previous answer is shown below; changing it replaces it.{{end}}</p>
+
+  <form method="post" action="/s/{{$d.Survey.ID}}/vote">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <ul class="ballot">
+      {{range $d.Options}}
+      <li>
+        <input type="checkbox" id="opt-{{.ID}}" name="choice" value="{{.ID}}"
+               {{if index $d.Selected .ID}}checked{{end}}>
+        <label for="opt-{{.ID}}" data-testid="option">{{.Text}}
+          {{if eq .Status "pending"}}<span class="pendingtag">awaiting review</span>{{end}}
+        </label>
+      </li>
+      {{else}}
+      <li class="muted">This survey has no options yet.</li>
+      {{end}}
+    </ul>
+
+    {{if $d.Survey.AllowComment}}
+    <label for="comment">Anything else you want to add? (optional)</label>
+    <textarea id="comment" name="comment" maxlength="2000" data-testid="comment">{{$d.Comment}}</textarea>
+    {{end}}
+
+    <p><button class="primary" type="submit" data-testid="submit-vote">
+      {{if $d.Responded}}Update my response{{else}}Submit my response{{end}}</button></p>
+  </form>
+
+  {{if $d.Survey.AllowWriteIn}}
+  <div class="card">
+    <h2>Something missing?</h2>
+    <p class="hint">Suggest an option. A moderator reviews it before anyone else sees it; your thumbs-up for it
+      is saved now and counts once it is approved.</p>
+    <form method="post" action="/s/{{$d.Survey.ID}}/writein">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <label for="writein">Your suggestion</label>
+      <input id="writein" name="text" type="text" maxlength="200" required data-testid="writein-text">
+      <p><button type="submit" data-testid="submit-writein">Suggest it</button></p>
+    </form>
+  </div>
+  {{end}}
+{{else}}
+  <p class="flash" data-testid="closed">This survey is closed and is no longer accepting responses.
+    {{if $d.Responded}}Your response was recorded.{{end}}</p>
+{{end}}
+
+{{if $d.Survey.ShowResults}}
+  <h2>Results so far</h2>
+  {{template "tally" $d}}
+{{end}}
+{{end}}

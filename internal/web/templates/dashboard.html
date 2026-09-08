@@ -1,0 +1,38 @@
+{{define "content"}}
+<h1>Surveys</h1>
+
+{{if canEdit .User}}
+<details class="card" {{if not .Data}}open{{end}}>
+  <summary data-testid="new-survey-toggle"><strong>New survey</strong></summary>
+  <form method="post" action="/admin/surveys">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label for="title">Title</label>
+    <input id="title" name="title" type="text" required data-testid="new-title">
+    <label for="description">Description (optional)</label>
+    <textarea id="description" name="description" data-testid="new-description"></textarea>
+    <label for="options">Options, one per line</label>
+    <textarea id="options" name="options" data-testid="new-options"></textarea>
+    <p class="hint">You can add, rename and remove options later.</p>
+    <p><button class="primary" type="submit" data-testid="create-survey">Create draft</button></p>
+  </form>
+</details>
+{{end}}
+
+<table data-testid="survey-list">
+  <thead><tr><th>Survey</th><th class="num">Responses</th><th class="num">To review</th><th>State</th></tr></thead>
+  <tbody>
+  {{range .Data}}
+    <tr data-testid="survey-row" data-survey="{{.Survey.ID}}">
+      <td><a href="/admin/s/{{.Survey.ID}}">{{.Survey.Title}}</a>
+        <div class="muted">created {{localtime .Survey.Created}}</div></td>
+      <td class="num">{{.Responses}}</td>
+      <td class="num">{{if .Pending}}<strong>{{.Pending}}</strong>{{else}}0{{end}}</td>
+      <td><span class="state state-{{.Survey.State}}">{{.Survey.State}}</span>
+        {{if .Overdue}}<div class="muted">closed by schedule</div>{{end}}</td>
+    </tr>
+  {{else}}
+    <tr><td colspan="4" class="muted">No surveys yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
