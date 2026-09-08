@@ -16,7 +16,7 @@ Two audiences, one binary:
 
 | Constraint | Consequence |
 |---|---|
-| Go, single container | One static binary; templates and CSS embedded with `embed.FS`, zone database compiled in with `time/tzdata` |
+| Go, single container | One static binary; templates and CSS embedded with `embed.FS`, zone database compiled in with `time/tzdata`. `CGO_ENABLED=0` throughout, which is why the SQLite driver is `modernc.org/sqlite` rather than the cgo one |
 | No database | State is files under one data directory, mirrored in memory |
 | Responses anonymous | Nothing identifying is stored — no account link, no IP, no user agent |
 | Cookies deter repeat voting | A random browser token, keyed and hashed per survey before storage |
@@ -48,27 +48,64 @@ through.
 
 ## Storage
 
+Everything lives in one SQLite database:
+
 ```
-$QS_DATA_DIR/
-  secret.key                     32 random bytes, generated on first start
-  users.json                     accounts: name, role, PBKDF2 verifier
-  surveys/<id>/survey.json       definition — rewritten atomically
-  surveys/<id>/responses.jsonl   append-only, one JSON object per line
+$QS_DATA_DIR/quicksurvey.db      accounts, invitations, surveys, options,
+                                 responses, and the instance HMAC key
 ```
 
-Definitions are small and change rarely, so they are rewritten whole via
-temp-file-plus-rename: a reader or a crash never sees half a file. Responses are
-appended and never rewritten, so a hard kill can lose at most the last line;
-`loadResponses` skips a torn line rather than refusing to start.
+The first version of this used hand-rolled files — JSON definitions rewritten
+atomically, responses in an append-only log, replayed at startup. That was
+defensible for one container on one host. It stopped being defensible once the
+target became Kubernetes, where the platform will start a second pod on your
+behalf during a rollout. Two writers against those files interleave and corrupt
+silently. The alternative on offer was a `flock` scheme of my own invention
+guarding a file format of my own invention; SQLite is the same guarantee from
+something exercised by billions of installations.
 
-Everything is also held in memory and reads are served from there. The files are
-the durable copy, replayed at startup. This is the trade the "no database"
-constraint buys: no query language, no concurrent writers, and a working set
-that must fit in RAM. For the scale this is built for — surveys with hundreds to
-low thousands of respondents — that is not a limit anyone will meet.
+It also deleted code. `AddWriteIn` used to create an option, write the survey,
+append a response, and hand-roll an undo if the second write failed.
+`ClaimInvite` had the same shape. Those were transactions written out longhand;
+`BEGIN`/`COMMIT` replaced them and the bugs hiding in them.
 
-**A single process must own the data directory.** There is no file locking. Do
-not run two replicas against one volume.
+The original constraint survives: SQLite is a library, not a service. Still one
+local file, still no daemon to run, patch or secure.
+
+### Connection settings, and the one that matters
+
+```
+_pragma=journal_mode(WAL)      readers do not block the writer
+_pragma=foreign_keys(1)        the ON DELETE CASCADEs actually fire
+_pragma=synchronous(NORMAL)    a crash can lose the last transaction, never the file
+_pragma=busy_timeout(10000)    a waiting writer waits instead of failing
+_txlock=immediate              see below
+```
+
+`_txlock=immediate` is the one that is easy to get wrong, and the concurrency
+test caught it being wrong. A plain `BEGIN` is *deferred*: the transaction opens
+as a reader and tries to become a writer at its first write. If another
+connection committed in between, that upgrade fails with `SQLITE_BUSY_SNAPSHOT`
+— and `busy_timeout` cannot rescue it, because no amount of waiting makes the
+upgrade legal; the transaction has to be discarded and retried. Taking the write
+lock up front with `BEGIN IMMEDIATE` turns an unrecoverable error into an
+ordinary wait.
+
+The pool is capped at one connection. Writes serialise regardless, the workload
+is a row lookup and a template, and one connection removes in-process
+`SQLITE_BUSY` as a category rather than papering over it with retries.
+
+**SQLite's locking is unreliable on NFS.** On a block device — which is what a
+DigitalOcean Block Storage volume is — it behaves correctly. An `RWX`
+NFS-backed volume would not be safe, and neither would a lock file.
+
+### One row per respondent
+
+`responses` holds one row per (survey, voter), replaced on resubmission, with
+`choices` as a child table. Superseded answers are not retained. The append-only
+log existed for crash safety, which WAL now provides; an audit trail was never
+asked for, and keeping one would mean storing more about respondents than the
+application needs — which cuts against the point.
 
 ## Anonymity, and what "prevent casual multiple voting" actually means
 
@@ -212,8 +249,9 @@ replaced before writing, so a comment can never shift a column.
 
 | If | Then |
 |---|---|
-| The process is killed mid-append | At most the last response line is lost; it is skipped at startup with a warning |
-| `secret.key` is lost or changed | Every session and every voter identity is invalidated. Existing responses stay, but returning respondents look new and can vote again |
-| Two processes share a data directory | Lost writes. There is no locking; don't |
+| The process is killed mid-write | WAL rolls back the incomplete transaction on the next open; committed responses survive |
+| The instance key is lost | Every session and every voter identity is invalidated. Existing responses stay, but returning respondents look new and can vote again |
+| Two processes share a data directory | Both work. SQLite serialises them; `BEGIN IMMEDIATE` plus `busy_timeout` turns contention into waiting. Nothing above the storage layer wants a second instance, so still run one |
 | The data volume is not persistent | Everything is gone on restart, including accounts |
 | A survey passes its `close_at` | It stops accepting responses; the state still reads `open`, and the UI says "closed by schedule" |
+| You copy `quicksurvey.db` by hand from a running instance | You may get a torn snapshot. Use `quicksurvey backup`, or a storage-layer snapshot |

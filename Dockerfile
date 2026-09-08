@@ -1,13 +1,15 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.24-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
+RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-# The module has no dependencies, so this never reaches the network. The zone
-# database is compiled into the binary (see time/tzdata in main.go), which is
-# what lets the runtime image carry nothing at all.
+# CGO stays off: the SQLite driver is modernc.org/sqlite, a pure-Go
+# translation, so the runtime image needs no libc. The zone database is
+# compiled into the binary (see time/tzdata in main.go), which is what lets the
+# runtime image carry nothing at all.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /quicksurvey ./cmd/quicksurvey
 # An empty directory to seed /data with, so a fresh named volume inherits its
 # ownership from the image rather than being created root-owned.

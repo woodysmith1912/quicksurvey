@@ -8,9 +8,9 @@ anonymous. Results download as TSV for Google Sheets.
 
 - **Respondents** — no account, no sign-in, nothing identifying stored.
 - **Accounts** — `viewer`, `editor`, `admin`, for reading results and editing surveys.
-- **Storage** — plain files in one directory. No database.
-- **Dependencies** — none. Go standard library only.
-- **Image** — distroless, non-root, read-only root filesystem. ~11 MB.
+- **Storage** — one SQLite file in one directory. No database server to run.
+- **Dependencies** — SQLite, via the pure-Go `modernc.org/sqlite`. No cgo.
+- **Image** — distroless, non-root, read-only root filesystem. ~16 MB.
 
 See [DESIGN.md](DESIGN.md) for how it works and what its failure modes are, and
 [TODO.md](TODO.md) for what is and is not finished.
@@ -108,8 +108,10 @@ Two things the app deliberately does not do, and that your proxy should:
 - **Rate limiting.** There is no throttle on sign-in attempts.
 - **TLS.** Without it, `Secure` cookies do not work and nothing is private.
 
-**Run exactly one instance per data directory.** There is no file locking;
-two processes sharing a volume will lose writes.
+**One writer is still the design.** Run a single replica. Two processes sharing
+a data directory will not corrupt it — SQLite serialises them — but nothing
+above the storage layer expects a second instance, so there is no reason to run
+one.
 
 ## Using it
 
@@ -204,21 +206,28 @@ instead:
 printf %s "$PW" | quicksurvey user add -name alice -role editor
 ```
 
-Stop the server before running `user` or `export` against the same data
-directory, or run them via `docker compose exec` inside the running container —
-the CLI opens the same files the server owns.
+These are safe to run against a live server: SQLite serialises the writes. In
+Kubernetes, `kubectl exec` into the pod, or run a one-off pod mounting the same
+volume — though with a `ReadWriteOnce` volume that has to land on the same node.
 
 ## Backup
 
-Stop nothing; copy the data directory.
-
 ```sh
-tar czf quicksurvey-$(date +%F).tar.gz -C /var/lib/quicksurvey .
+quicksurvey backup -to /backups/quicksurvey-$(date +%F).db
 ```
 
-Losing `secret.key` invalidates every session and every voter cookie: existing
-responses survive, but returning respondents look like new people and can vote
-again. Back it up with the rest.
+Safe to run against a live instance. **Do not just copy `quicksurvey.db`** — in
+WAL mode recent commits live in a side file, so a plain copy can catch the
+database mid-write. `backup` uses SQLite's own `VACUUM INTO`, which produces a
+consistent snapshot. The result is an ordinary SQLite file; restoring is copying
+it back into the data directory.
+
+In Kubernetes, prefer a scheduled CSI `VolumeSnapshot` — that happens at the
+storage layer, so nothing has to mount the volume alongside the running pod.
+
+The instance's HMAC key lives in the database, so a backup carries it. Losing it
+invalidates every session and every voter cookie: existing responses survive,
+but returning respondents look like new people and can vote again.
 
 ## Tests
 

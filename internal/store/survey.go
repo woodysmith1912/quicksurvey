@@ -2,11 +2,10 @@ package store
 
 import (
 	"crypto/sha256"
-	"encoding/json"
+	"database/sql"
+	"errors"
 	"fmt"
 	"math/rand/v2"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -195,42 +194,93 @@ func (s *Survey) PendingOptions() []Option {
 	return out
 }
 
-func (s *Store) surveyDir(id string) string  { return filepath.Join(s.dir, "surveys", id) }
-func (s *Store) surveyPath(id string) string { return filepath.Join(s.surveyDir(id), "survey.json") }
+// --- persistence ----------------------------------------------------------
 
-func (s *Store) loadSurveys() error {
-	entries, err := os.ReadDir(filepath.Join(s.dir, "surveys"))
+const surveyColumns = `id, type, title, description, state, show_results,
+	allow_write_in, allow_comment, no_randomize, close_at, first_opened_at, created, updated`
+
+func scanSurvey(row rowScanner) (*Survey, error) {
+	var sv Survey
+	var created, updated string
+	var closeAt, firstOpened sql.NullString
+	if err := row.Scan(&sv.ID, &sv.Type, &sv.Title, &sv.Description, &sv.State,
+		&sv.ShowResults, &sv.AllowWriteIn, &sv.AllowComment, &sv.NoRandomize,
+		&closeAt, &firstOpened, &created, &updated); err != nil {
+		return nil, err
+	}
+	sv.CloseAt, sv.FirstOpenedAt = goTimePtr(closeAt), goTimePtr(firstOpened)
+	sv.Created, sv.Updated = goTime(created), goTime(updated)
+	return &sv, nil
+}
+
+type queryer interface {
+	Query(string, ...any) (*sql.Rows, error)
+	QueryRow(string, ...any) *sql.Row
+}
+
+// loadOptions fills in a survey's options, in the editor's order.
+func loadOptions(q queryer, sv *Survey) error {
+	rows, err := q.Query(
+		`SELECT id, text, status, source, merged_into, created
+		 FROM options WHERE survey_id = ? ORDER BY position`, sv.ID)
 	if err != nil {
 		return err
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		b, err := os.ReadFile(s.surveyPath(e.Name()))
-		if os.IsNotExist(err) {
-			continue // directory without a definition: ignore
-		} else if err != nil {
+	defer rows.Close()
+	for rows.Next() {
+		var o Option
+		var created string
+		if err := rows.Scan(&o.ID, &o.Text, &o.Status, &o.Source, &o.MergedInto, &created); err != nil {
 			return err
 		}
-		var sv Survey
-		if err := json.Unmarshal(b, &sv); err != nil {
-			return fmt.Errorf("survey %s: %w", e.Name(), err)
-		}
-		s.surveys[sv.ID] = &sv
-		if err := s.loadResponses(sv.ID); err != nil {
+		o.Created = goTime(created)
+		sv.Options = append(sv.Options, o)
+	}
+	return rows.Err()
+}
+
+func loadSurvey(q queryer, id string) (*Survey, error) {
+	sv, err := scanSurvey(q.QueryRow(`SELECT `+surveyColumns+` FROM surveys WHERE id = ?`, id))
+	if err != nil {
+		return nil, err
+	}
+	if err := loadOptions(q, sv); err != nil {
+		return nil, err
+	}
+	return sv, nil
+}
+
+// saveSurvey writes a survey and its options. Options are upserted by ID rather
+// than replaced, because responses reference them and an ID must never be
+// reused for different text.
+func saveSurvey(tx *sql.Tx, sv *Survey) error {
+	if _, err := tx.Exec(
+		`INSERT INTO surveys (`+surveyColumns+`)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   type=excluded.type, title=excluded.title, description=excluded.description,
+		   state=excluded.state, show_results=excluded.show_results,
+		   allow_write_in=excluded.allow_write_in, allow_comment=excluded.allow_comment,
+		   no_randomize=excluded.no_randomize, close_at=excluded.close_at,
+		   first_opened_at=excluded.first_opened_at, updated=excluded.updated`,
+		sv.ID, sv.Type, sv.Title, sv.Description, sv.State, sv.ShowResults,
+		sv.AllowWriteIn, sv.AllowComment, sv.NoRandomize,
+		dbTimePtr(sv.CloseAt), dbTimePtr(sv.FirstOpenedAt),
+		dbTime(sv.Created), dbTime(sv.Updated)); err != nil {
+		return err
+	}
+	for i, o := range sv.Options {
+		if _, err := tx.Exec(
+			`INSERT INTO options (id, survey_id, position, text, status, source, merged_into, created)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+			   position=excluded.position, text=excluded.text, status=excluded.status,
+			   source=excluded.source, merged_into=excluded.merged_into`,
+			o.ID, sv.ID, i, o.Text, o.Status, o.Source, o.MergedInto, dbTime(o.Created)); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// saveSurvey must be called with s.mu held.
-func (s *Store) saveSurvey(sv *Survey) error {
-	if err := os.MkdirAll(s.surveyDir(sv.ID), 0o700); err != nil {
-		return err
-	}
-	return writeJSONAtomic(s.surveyPath(sv.ID), sv, 0o600)
 }
 
 // CreateSurvey stores a new survey in the draft state.
@@ -258,76 +308,91 @@ func (s *Store) CreateSurvey(title, description string, optionTexts []string) (*
 			})
 		}
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.surveys[sv.ID]; ok {
-		return nil, ErrExists
-	}
-	if err := s.saveSurvey(sv); err != nil {
+	if err := s.tx(func(tx *sql.Tx) error { return saveSurvey(tx, sv) }); err != nil {
 		return nil, err
 	}
-	s.surveys[sv.ID] = sv
-	s.responses[sv.ID] = map[string]*Response{}
 	return sv.Clone(), nil
 }
 
 // Survey returns a copy of the named survey.
 func (s *Store) Survey(id string) (*Survey, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	sv, ok := s.surveys[id]
-	if !ok {
+	sv, err := loadSurvey(s.db, id)
+	if err != nil {
 		return nil, false
 	}
-	return sv.Clone(), true
+	return sv, true
 }
 
-// Surveys returns copies of every survey, newest first.
+// Surveys returns every survey, newest first.
 func (s *Store) Surveys() []*Survey {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]*Survey, 0, len(s.surveys))
-	for _, sv := range s.surveys {
-		out = append(out, sv.Clone())
+	rows, err := s.db.Query(`SELECT ` + surveyColumns + ` FROM surveys ORDER BY created DESC`)
+	if err != nil {
+		return nil
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Created.After(out[j].Created) })
+	defer rows.Close()
+	var out []*Survey
+	for rows.Next() {
+		sv, err := scanSurvey(rows)
+		if err != nil {
+			return out
+		}
+		out = append(out, sv)
+	}
+	if err := rows.Err(); err != nil {
+		return out
+	}
+	for _, sv := range out {
+		if err := loadOptions(s.db, sv); err != nil {
+			return out
+		}
+	}
 	return out
 }
 
-// UpdateSurvey applies fn to the stored survey under lock and persists the
-// result. fn must not call back into the store.
+// UpdateSurvey applies fn to the stored survey inside a transaction and
+// persists the result. fn must not call back into the store.
 func (s *Store) UpdateSurvey(id string, fn func(*Survey) error) (*Survey, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sv, ok := s.surveys[id]
-	if !ok {
-		return nil, fmt.Errorf("survey %q: %w", id, ErrNotFound)
-	}
-	draft := sv.Clone()
-	if err := fn(draft); err != nil {
+	var out *Survey
+	err := s.tx(func(tx *sql.Tx) error {
+		sv, err := loadSurvey(tx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("survey %q: %w", id, ErrNotFound)
+		} else if err != nil {
+			return err
+		}
+		if err := fn(sv); err != nil {
+			return err
+		}
+		sv.Updated = time.Now().UTC()
+		if err := saveSurvey(tx, sv); err != nil {
+			return err
+		}
+		out = sv.Clone()
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	draft.Updated = time.Now().UTC()
-	if err := s.saveSurvey(draft); err != nil {
-		return nil, err
-	}
-	s.surveys[id] = draft
-	return draft.Clone(), nil
+	return out, nil
 }
 
-// DeleteSurvey removes a survey and every response to it, irreversibly.
+// DeleteSurvey removes a survey and every response to it, irreversibly. The
+// options and responses go with it through ON DELETE CASCADE.
 func (s *Store) DeleteSurvey(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.surveys[id]; !ok {
-		return fmt.Errorf("survey %q: %w", id, ErrNotFound)
-	}
-	if err := os.RemoveAll(s.surveyDir(id)); err != nil {
-		return err
-	}
-	delete(s.surveys, id)
-	delete(s.responses, id)
-	return nil
+	return s.tx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`DELETE FROM surveys WHERE id = ?`, id)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("survey %q: %w", id, ErrNotFound)
+		}
+		return nil
+	})
 }
 
 // SetOptionText renames an option. Votes are unaffected: they reference the ID.
