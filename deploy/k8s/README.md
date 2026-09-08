@@ -9,7 +9,7 @@ kubectl apply -k deploy/k8s
 
 ## Before you apply
 
-**1. Point DNS at Traefik.** `survey.plainwrapworks.com` must resolve to
+**1. Point DNS at Traefik.** `quicksurveys.plainwrapworks.com` must resolve to
 `<LB-IP>` — the `traefik-ingress-service` LoadBalancer. Traefik obtains
 certificates by TLS-ALPN challenge, which resolves the hostname, so issuance
 fails until DNS is live. Applying early is harmless; it just will not get a
@@ -29,6 +29,16 @@ kubectl -n quicksurvey logs statefulset/quicksurvey | grep password
 ```
 
 It must be changed at first sign-in before the account can do anything.
+
+## Changing the hostname
+
+Edit `spec.rules[0].host` in `ingress.yaml`. Nothing else.
+
+`QS_BASE_URL` in the StatefulSet is derived from it by a kustomize
+`replacements` block, so the two cannot drift. That matters more than it looks:
+if they disagree, the app still works, but every editor is handed a shareable
+link pointing at a host that does not serve the survey — a failure nobody
+notices until a respondent says the link is broken.
 
 ## How this fits the cluster
 

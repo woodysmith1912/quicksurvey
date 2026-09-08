@@ -3,7 +3,7 @@
 ## Next
 - [ ] Publish the image to `ghcr.io/woodysmith1912/quicksurvey` and make the
       package public — this cluster has no registry pull secrets.
-- [ ] Point `survey.plainwrapworks.com` at `<LB-IP>` before applying, or
+- [ ] Point `quicksurveys.plainwrapworks.com` at `<LB-IP>` before applying, or
       Traefik's TLS-ALPN challenge cannot resolve the host.
 - [ ] Traefik in this cluster stores `acme.json` inside its container with no
       volume, so it re-requests every certificate on restart. Not ours, but a

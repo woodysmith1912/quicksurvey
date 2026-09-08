@@ -24,6 +24,24 @@ labels:
 
 # Set the image once, here, rather than editing the StatefulSet. Prefer a digest
 # over a tag for anything you want to be able to roll back to with certainty.
+# One hostname, one place. The Ingress rule is the source of truth; this copies
+# it into QS_BASE_URL so the shareable link editors are shown always matches the
+# host that actually serves the survey.
+replacements:
+  - source:
+      kind: Ingress
+      name: quicksurvey
+      fieldPath: spec.rules.0.host
+    targets:
+      - select:
+          kind: StatefulSet
+          name: quicksurvey
+        fieldPaths:
+          - spec.template.spec.containers.[name=quicksurvey].env.[name=QS_BASE_URL].value
+        options:
+          delimiter: "://"
+          index: 1
+
 images:
   - name: ghcr.io/woodysmith1912/quicksurvey
     newTag: v0.1.0
