@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: quicksurvey
+  labels:
+    app.kubernetes.io/name: quicksurvey
+    # The image is distroless, non-root and read-only, so it satisfies the
+    # strictest Pod Security Standard. Nothing else in this cluster sets these
+    # labels; declaring them here makes the guarantee enforced rather than
+    # merely intended.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

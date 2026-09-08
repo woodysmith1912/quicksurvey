@@ -1,10 +1,13 @@
 # QuickSurvey — development TODO
 
 ## Next
-- [ ] Kubernetes manifests for DOKS: StatefulSet, one replica,
-      `do-block-storage` PVC, a StorageClass with `reclaimPolicy: Retain`,
-      probes on `/healthz`, ingress + cert-manager for plainwrapworks.com,
-      and a scheduled CSI VolumeSnapshot for backups.
+- [ ] Publish the image to `ghcr.io/woodysmith1912/quicksurvey` and make the
+      package public — this cluster has no registry pull secrets.
+- [ ] Point `survey.plainwrapworks.com` at `<LB-IP>` before applying, or
+      Traefik's TLS-ALPN challenge cannot resolve the host.
+- [ ] Traefik in this cluster stores `acme.json` inside its container with no
+      volume, so it re-requests every certificate on restart. Not ours, but a
+      Let's Encrypt rate-limit incident waiting to happen.
 
 ## Improvements
 - [x] The front page is a splash that explains the site; the sign-in link sits
@@ -35,13 +38,16 @@
 - [x] `cmd/quicksurvey` — `serve`, `user`, `export`; bootstrap admin on first start
 - [x] `quicksurvey backup` via `VACUUM INTO` — safe against a live instance
 - [x] Dockerfile, compose file, Makefile
+- [x] Kubernetes manifests for DOKS (`deploy/k8s`): StatefulSet on a Retain
+      block-storage volume, Traefik Ingress with automatic Let's Encrypt,
+      app-level HTTPS redirect, nightly CSI VolumeSnapshots with retention
 - [x] README.md, DESIGN.md
-- [x] Go tests: 78 across `internal/store`, `internal/export`, `internal/web` — `make test`
+- [x] Go tests: 80 across `internal/store`, `internal/export`, `internal/web` — `make test`
 - [x] Playwright specs: respondent, write-in/moderation, admin, accounts,
       splash, draft preview, invitations
 
 ## Verified on this machine
-- [x] `make test` — 78 Go tests, green
+- [x] `make test` — 80 Go tests, green
 - [x] `make e2e-docker` — 33 Playwright tests, green, 40s, nothing installed on
       the host. Slowest single test 1.8s; every interaction capped at 3s.
 - [x] Image builds distroless and runs read-only as uid 65532; Docker reports

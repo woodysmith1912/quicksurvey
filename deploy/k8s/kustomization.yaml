@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: quicksurvey
+
+resources:
+  - namespace.yaml
+  - statefulset.yaml
+  - service.yaml
+  - ingress.yaml
+  - backup.yaml
+
+# includeSelectors: false matters. commonLabels — and labels with
+# includeSelectors: true — copy these into spec.selector.matchLabels, which is
+# immutable on a StatefulSet. Renaming the suite would then mean deleting and
+# recreating it. Selectors stay minimal and explicit in the manifests; these are
+# decoration.
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/name: quicksurvey
+      app.kubernetes.io/part-of: plainwrapworks
+      app.kubernetes.io/managed-by: kustomize
+
+# Set the image once, here, rather than editing the StatefulSet. Prefer a digest
+# over a tag for anything you want to be able to roll back to with certainty.
+images:
+  - name: ghcr.io/woodysmith1912/quicksurvey
+    newTag: v0.1.0

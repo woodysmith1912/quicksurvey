@@ -20,6 +20,7 @@ type harness struct {
 	t   *testing.T
 	st  *store.Store
 	srv *httptest.Server
+	web *Server
 }
 
 func newHarness(t *testing.T) *harness {
@@ -38,7 +39,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	srv := httptest.NewServer(s)
 	t.Cleanup(srv.Close)
-	return &harness{t: t, st: st, srv: srv}
+	return &harness{t: t, st: st, srv: srv, web: s}
 }
 
 // browser is an HTTP client with its own cookie jar, which is what makes it a
@@ -946,5 +947,40 @@ func TestEditFormTogglesRandomising(t *testing.T) {
 	got, _ = h.st.Survey(sv.ID)
 	if !got.Randomize() {
 		t.Error("ticking the box did not turn randomising back on")
+	}
+}
+
+func TestHTTPSRedirect(t *testing.T) {
+	h := newHarness(t)
+	h.web.cfg.RedirectHTTPS = true
+	b := h.browser()
+
+	// A plain-HTTP visit is sent to https, keeping path and query.
+	r := b.get("/s/abc?x=1")
+	if r.status != http.StatusPermanentRedirect {
+		t.Fatalf("status = %d, want 308 — a 302 would turn a POSTed vote into a GET", r.status)
+	}
+	if !strings.HasPrefix(r.location, "https://") || !strings.HasSuffix(r.location, "/s/abc?x=1") {
+		t.Errorf("Location = %q, want an https URL preserving path and query", r.location)
+	}
+
+	// A request the proxy already terminated is served normally.
+	req, _ := http.NewRequest("GET", b.base+"/", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	if got := b.do(req); got.status != http.StatusOK {
+		t.Errorf("X-Forwarded-Proto: https = %d, want 200", got.status)
+	}
+
+	// The health check must never redirect: kubelet probes the pod directly
+	// over plain HTTP, and a redirect would fail every probe.
+	if got := b.get("/healthz"); got.status != http.StatusOK {
+		t.Errorf("/healthz = %d, want 200 — probes would fail", got.status)
+	}
+}
+
+func TestNoRedirectWhenDisabled(t *testing.T) {
+	h := newHarness(t)
+	if r := h.browser().get("/"); r.status != http.StatusOK {
+		t.Errorf("status = %d, want 200 when redirecting is off", r.status)
 	}
 }

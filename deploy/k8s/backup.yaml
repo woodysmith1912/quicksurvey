@@ -1,0 +1,116 @@
+# Backups as CSI VolumeSnapshots.
+#
+# The obvious approach — a sidecar or CronJob that tars /data — cannot work
+# here. The volume is ReadWriteOnce, so a second pod mounting it has to land on
+# the same node as the running one, and will otherwise sit Pending forever.
+# Snapshots happen inside the storage layer and mount nothing, which is what
+# makes them the right tool for a single-writer RWO volume.
+#
+# SQLite in WAL mode keeps recent commits in a side file, so a snapshot is a
+# crash-consistent image rather than a clean copy. That is safe — WAL recovers
+# on the next open, which is precisely what WAL is for — but if you want a
+# guaranteed-clean file instead, run
+#
+#   kubectl -n quicksurvey exec quicksurvey-0 -- quicksurvey backup -to /data/backup.db
+#
+# which uses SQLite's VACUUM INTO and is safe against the live database.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: quicksurvey-backup
+  namespace: quicksurvey
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: quicksurvey-backup
+  namespace: quicksurvey
+rules:
+  # Scoped to this namespace and to snapshots alone. The job can create and
+  # prune its own backups and nothing else.
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["create", "get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: quicksurvey-backup
+  namespace: quicksurvey
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: quicksurvey-backup
+subjects:
+  - kind: ServiceAccount
+    name: quicksurvey-backup
+    namespace: quicksurvey
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: quicksurvey-backup
+  namespace: quicksurvey
+spec:
+  schedule: "17 3 * * *" # nightly, off the hour to avoid the stampede
+  timeZone: America/New_York
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          serviceAccountName: quicksurvey-backup
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: snapshot
+              image: bitnami/kubectl:1.33
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { memory: 128Mi }
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  NAME="quicksurvey-$(date -u +%Y%m%d-%H%M%S)"
+                  echo "creating VolumeSnapshot $NAME"
+                  cat <<YAML | kubectl apply -f -
+                  apiVersion: snapshot.storage.k8s.io/v1
+                  kind: VolumeSnapshot
+                  metadata:
+                    name: $NAME
+                    namespace: quicksurvey
+                    labels:
+                      app.kubernetes.io/name: quicksurvey
+                      backup: nightly
+                  spec:
+                    volumeSnapshotClassName: do-block-storage
+                    source:
+                      persistentVolumeClaimName: data-quicksurvey-0
+                  YAML
+
+                  # Keep the newest KEEP snapshots and delete the rest. Sorting
+                  # by creation timestamp rather than by name means a snapshot
+                  # taken by hand is aged out on the same terms.
+                  KEEP=14
+                  kubectl -n quicksurvey get volumesnapshot \
+                    -l backup=nightly \
+                    --sort-by=.metadata.creationTimestamp \
+                    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+                    | head -n -"$KEEP" \
+                    | xargs -r -n1 kubectl -n quicksurvey delete volumesnapshot
+                  echo "done"

@@ -1,0 +1,37 @@
+# Traefik in this cluster runs with --providers.kubernetesIngress and NOT
+# kubernetesCRD, so an IngressRoute would be silently ignored. A plain Ingress
+# is the only thing it serves.
+#
+# There is deliberately no tls: block and no ingress class. Traefik is started
+# with
+#
+#   --entrypoints.websecure.http.tls.certresolver=default
+#   --certificatesresolvers.default.acme.tlschallenge
+#
+# so every Ingress it picks up gets a Let's Encrypt certificate automatically,
+# by TLS-ALPN challenge on :443. Every existing Ingress in this cluster looks
+# exactly like this one. Adding a tls: section here would ask Traefik for a
+# secret that nothing creates.
+#
+# BEFORE APPLYING: point survey.plainwrapworks.com at <LB-IP>, the
+# traefik-ingress-service LoadBalancer. The TLS-ALPN challenge resolves the
+# hostname, so issuance fails until DNS is live.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: quicksurvey
+  namespace: quicksurvey
+  labels:
+    app.kubernetes.io/name: quicksurvey
+spec:
+  rules:
+    - host: survey.plainwrapworks.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: quicksurvey
+                port:
+                  name: web
