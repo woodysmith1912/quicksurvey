@@ -1,0 +1,12 @@
+{{define "content"}}
+<h1>Sign in</h1>
+<form method="post" action="/login" class="card">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <input type="hidden" name="next" value="{{.Data.Next}}">
+  <label for="username">Username</label>
+  <input id="username" name="username" type="text" autocomplete="username" required value="{{.Data.Name}}">
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <p><button class="primary" type="submit" data-testid="signin">Sign in</button></p>
+</form>
+{{end}}

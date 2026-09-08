@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">QuickSurvey</a>
+  {{if .User}}
+  <nav>
+    <a href="/admin/">Surveys</a>
+    {{if isAdmin .User}}<a href="/admin/users">Accounts</a>{{end}}
+    <a href="/account/password">Password</a>
+    <span class="who" data-testid="whoami">{{.User.Name}} <em>({{.User.Role}})</em></span>
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="link" type="submit">Sign out</button>
+    </form>
+  </nav>
+  {{else}}
+  <nav><a class="quiet" href="/login" data-testid="signin-link">Sign in</a></nav>
+  {{end}}
+</header>
+
+<main>
+{{with .Flash}}{{if .Message}}
+<p class="flash {{if .Error}}flash-error{{else}}flash-ok{{end}}" data-testid="flash" role="status">{{.Message}}</p>
+{{end}}{{end}}
+{{template "content" .}}
+</main>
+
+<footer><p>QuickSurvey — responses are anonymous.</p></footer>
+</body>
+</html>

@@ -1,0 +1,112 @@
+{{define "content"}}
+{{$d := .Data}}
+<div class="row spread">
+  <h1>{{$d.Survey.Title}}</h1>
+  <span class="state state-{{$d.Survey.State}}" data-testid="state">{{$d.Survey.State}}</span>
+</div>
+{{with $d.Survey.Description}}<p>{{.}}</p>{{end}}
+
+<div class="card">
+  <h2>Share this link</h2>
+  <code class="url" data-testid="share-url">{{$d.URL}}</code>
+  {{if eq $d.Survey.State "draft"}}
+    <p class="hint">The link does not work for anyone else until you publish the survey. You can open it
+      yourself to try the survey as a respondent would; those test responses are discarded when you publish.</p>
+  {{end}}
+  {{if not $d.Survey.CloseAt.IsZero}}
+    <p class="hint">Scheduled to close {{localtime $d.Survey.CloseAt}}{{if $d.Overdue}} — already past, so it is no longer accepting responses{{end}}.</p>
+  {{end}}
+  {{if $d.CanEdit}}
+  <div class="row">
+    <form method="post" action="/admin/s/{{$d.Survey.ID}}/state" class="inline">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      {{if eq $d.Survey.State "open"}}
+        <input type="hidden" name="state" value="closed">
+        <button type="submit" data-testid="close-survey">Close survey</button>
+      {{else}}
+        <input type="hidden" name="state" value="open">
+        <button class="primary" type="submit" data-testid="open-survey">
+          {{if eq $d.Survey.State "draft"}}Publish{{else}}Reopen{{end}}</button>
+      {{end}}
+    </form>
+    <a class="btn" href="/admin/s/{{$d.Survey.ID}}/edit" data-testid="edit-link">Edit</a>
+    <a class="btn" href="/s/{{$d.Survey.ID}}" data-testid="take-survey">
+      {{if eq $d.Survey.State "draft"}}Preview and try it{{else}}Open as a respondent{{end}}</a>
+  </div>
+  {{end}}
+</div>
+
+<h2>Results</h2>
+{{template "tally" $d}}
+<p class="row">
+  <a class="btn" href="/admin/s/{{$d.Survey.ID}}/export/responses.tsv" data-testid="export-responses">Download responses (TSV)</a>
+  <a class="btn" href="/admin/s/{{$d.Survey.ID}}/export/summary.tsv" data-testid="export-summary">Download summary (TSV)</a>
+</p>
+<p class="hint">Tab-separated. In Google Sheets: File &rarr; Import &rarr; Upload, separator type "Tab".</p>
+
+{{if $d.CanEdit}}
+<h2>Suggestions to review <span class="muted">({{len $d.Pending}})</span></h2>
+{{if $d.Pending}}
+  {{range $d.Pending}}
+  <form method="post" action="/admin/s/{{$d.Survey.ID}}/moderate" class="card" data-testid="pending-item">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <input type="hidden" name="option" value="{{.ID}}">
+    <label for="text-{{.ID}}">Suggested option — edit the wording if you want</label>
+    <input id="text-{{.ID}}" name="text" type="text" value="{{.Text}}" data-testid="pending-text">
+    <div class="row">
+      <button class="primary" name="action" value="approve" type="submit" data-testid="approve">Approve</button>
+      <button name="action" value="reject" type="submit" data-testid="reject">Reject</button>
+      <select name="merge_into" aria-label="Merge into" data-testid="merge-target">
+        <option value="">merge into…</option>
+        {{range $d.MergeInto}}<option value="{{.ID}}">{{.Text}}</option>{{end}}
+      </select>
+      <button name="action" value="merge" type="submit" data-testid="merge">Merge</button>
+    </div>
+    <p class="hint">Merging moves the vote to the option you pick and keeps the tally honest.</p>
+  </form>
+  {{end}}
+{{else}}
+  <p class="muted" data-testid="no-pending">Nothing waiting for review.</p>
+{{end}}
+{{end}}
+
+<h2>Comments <span class="muted">({{len $d.Comments}})</span></h2>
+<p class="hint">Comments are visible to signed-in accounts only, and are never shown to respondents.</p>
+{{if $d.Comments}}
+<table data-testid="comments">
+  <thead><tr><th>When</th><th>Comment</th></tr></thead>
+  <tbody>
+  {{range $d.Comments}}<tr><td class="muted">{{localtime .Updated}}</td><td>{{.Comment}}</td></tr>{{end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No comments.</p>{{end}}
+
+{{if $d.Removed}}
+<h2>Not on the ballot</h2>
+<table>
+  <thead><tr><th>Option</th><th>Status</th>{{if $d.CanEdit}}<th></th>{{end}}</tr></thead>
+  <tbody>
+  {{range $d.Removed}}
+  <tr><td>{{.Text}}</td><td class="muted">{{.Status}}</td>
+    {{if $d.CanEdit}}<td><form method="post" action="/admin/s/{{$d.Survey.ID}}/moderate" class="inline">
+      <input type="hidden" name="csrf" value="{{$.CSRF}}">
+      <input type="hidden" name="option" value="{{.ID}}">
+      <button class="link" name="action" value="restore" type="submit">restore</button>
+    </form></td>{{end}}
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
+{{if $d.CanEdit}}
+<h2>Delete</h2>
+<form method="post" action="/admin/s/{{$d.Survey.ID}}/delete" class="card">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <p>Deleting removes the survey and all {{$d.Responses}} {{plural $d.Responses "response" "responses"}}. This cannot be undone.</p>
+  <label for="confirm">Type the survey title to confirm</label>
+  <input id="confirm" name="confirm" type="text" data-testid="delete-confirm" autocomplete="off">
+  <p><button class="danger" type="submit" data-testid="delete-survey">Delete this survey</button></p>
+</form>
+{{end}}
+{{end}}

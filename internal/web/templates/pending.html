@@ -1,0 +1,11 @@
+{{define "content"}}
+<h1>Waiting for approval</h1>
+<p class="flash" data-testid="pending-notice">Your account <strong>{{.Data.Name}}</strong> has been created, but an
+  administrator still has to approve it. Until then there is nothing here for you to do.</p>
+<p class="hint">{{if .Data.InvitedBy}}{{.Data.InvitedBy}} invited you, so they are the person to nudge.
+  {{end}}You can close this page; sign in again later to check.</p>
+<form method="post" action="/logout">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <button type="submit">Sign out</button>
+</form>
+{{end}}

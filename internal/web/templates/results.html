@@ -1,0 +1,7 @@
+{{define "content"}}
+{{$d := .Data}}
+<h1>{{$d.Survey.Title}}</h1>
+<h2>Results</h2>
+{{template "tally" $d}}
+<p><a href="/s/{{$d.Survey.ID}}">Back to the survey</a></p>
+{{end}}

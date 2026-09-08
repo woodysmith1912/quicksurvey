@@ -1,0 +1,19 @@
+{{define "tally"}}
+<p class="hint" data-testid="respondents">{{.Voters}} {{plural .Voters "person has" "people have"}} responded.
+  Someone can pick more than one option, so the shares do not add up to 100%.</p>
+<table data-testid="tally">
+  <thead><tr><th>Option</th><th class="num">Votes</th><th class="num">Share</th><th></th></tr></thead>
+  <tbody>
+  {{range .Results}}
+    <tr data-testid="tally-row" data-option="{{.Option.Text}}">
+      <td>{{.Option.Text}}</td>
+      <td class="num" data-testid="votes">{{.Votes}}</td>
+      <td class="num">{{pct .Percent}}</td>
+      <td><progress class="bar" value="{{.Votes}}" max="{{if $.Voters}}{{$.Voters}}{{else}}1{{end}}"></progress></td>
+    </tr>
+  {{else}}
+    <tr><td colspan="4" class="muted">No options to show yet.</td></tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}

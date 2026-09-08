@@ -1,0 +1,116 @@
+# QuickSurvey.
+#
+#   docker compose up -d --build        run the app
+#   docker compose logs quicksurvey     the first admin password, printed once
+#   make e2e-docker                     browser tests, entirely in containers
+#
+# Services are grouped by profile so adding a process later — a backup sidecar,
+# a reverse proxy, a second app — does not disturb what is already here. Only
+# services without a profile start by default.
+
+x-app: &app
+  image: quicksurvey
+  build:
+    context: .
+
+# The image is distroless and writes nothing outside /data, so every service
+# runs with a read-only root filesystem, no capabilities, and as a non-root
+# user (uid 65532, set in the Dockerfile).
+#
+# no-new-privileges is deliberately NOT set here. Under snap-packaged Docker the
+# daemon itself runs confined by AppArmor (profile snap.docker.dockerd), so
+# starting a container requires an AppArmor profile transition at execve — and
+# no_new_privs forbids profile transitions. Every container then dies with
+#
+#     exec /usr/local/bin/quicksurvey: operation not permitted
+#
+# regardless of image, and neither --privileged nor apparmor=unconfined helps,
+# because switching to "unconfined" is also a transition. The flag buys little
+# here in any case: the image is distroless and contains no setuid or setgid
+# binary to escalate through. On a host where it works, add it back with
+#
+#     docker compose -f compose.yaml -f compose.no-new-privileges.yaml up -d
+#
+# or QS_NNP=1 with the make targets.
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+
+services:
+  # ---- the application -------------------------------------------------
+  quicksurvey:
+    <<: [*app, *hardening]
+    container_name: quicksurvey
+    restart: unless-stopped
+    # Bound to localhost. Put a TLS-terminating reverse proxy in front of this
+    # before exposing it to a network; see README.md.
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - data:/data
+    environment:
+      QS_TZ: America/New_York
+      # The container speaks plain HTTP. Leave this false only while reaching
+      # the port directly; set it true once a proxy terminates TLS.
+      QS_SECURE_COOKIES: "false"
+      # QS_BASE_URL: https://survey.example.com
+
+  # ---- browser tests ---------------------------------------------------
+  # A throwaway instance on its own volume, so a test run never touches the
+  # real one. `make e2e-docker` removes that volume before each run.
+
+  # There is no shell in the image to chain two commands, so seeding the
+  # administrator is its own container that must exit successfully first.
+  quicksurvey-test-init:
+    <<: [*app, *hardening]
+    profiles: [test]
+    command: ["user", "add", "-name", "admin", "-role", "admin"]
+    environment:
+      QS_PASSWORD: playwright-admin-pw
+    volumes:
+      - test-data:/data
+
+  quicksurvey-test:
+    <<: [*app, *hardening]
+    profiles: [test]
+    depends_on:
+      quicksurvey-test-init:
+        condition: service_completed_successfully
+    volumes:
+      - test-data:/data
+    environment:
+      QS_TZ: UTC
+      QS_SECURE_COOKIES: "false"
+      QS_BASE_URL: http://quicksurvey-test:8080
+    healthcheck:
+      test: ["CMD", "quicksurvey", "healthcheck"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  playwright:
+    profiles: [test]
+    # Pinned to the same version as e2e/package.json: the image ships the
+    # matching browsers, and a mismatch makes Playwright download its own.
+    image: mcr.microsoft.com/playwright:v1.49.1-noble
+    depends_on:
+      quicksurvey-test:
+        condition: service_healthy
+    working_dir: /work/e2e
+    volumes:
+      - ./:/work
+    # Runs as the invoking user, so reports and node_modules do not come back
+    # owned by root. `make e2e-docker` supplies these.
+    user: "${DOCKER_UID:-1000}:${DOCKER_GID:-1000}"
+    environment:
+      # Non-empty means "a server is already running there", which turns off the
+      # Playwright config's own build-and-launch path.
+      QS_E2E_BASE_URL: http://quicksurvey-test:8080
+      HOME: /tmp
+      npm_config_cache: /tmp/.npm
+      CI: "1"
+    command: ["sh", "-c", "npm install --no-audit --no-fund --silent && npx playwright test"]
+
+volumes:
+  data:
+  test-data:

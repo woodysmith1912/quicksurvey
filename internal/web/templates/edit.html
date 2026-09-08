@@ -1,0 +1,53 @@
+{{define "content"}}
+{{$d := .Data}}
+<h1>Edit survey</h1>
+<p><a href="/admin/s/{{$d.Survey.ID}}">&larr; back to results</a></p>
+
+<form method="post" action="/admin/s/{{$d.Survey.ID}}/edit">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+
+  <div class="card">
+    <label for="title">Title</label>
+    <input id="title" name="title" type="text" value="{{$d.Survey.Title}}" required data-testid="edit-title">
+    <label for="description">Description</label>
+    <textarea id="description" name="description" data-testid="edit-description">{{$d.Survey.Description}}</textarea>
+  </div>
+
+  <div class="card">
+    <h2>Options</h2>
+    <p class="hint">Respondents give a thumbs-up to as many of these as they like.
+      Renaming keeps existing votes. Removing takes an option off the ballot but leaves it in the export.</p>
+    {{range $d.Survey.Options}}
+      {{if or (eq .Status "approved") (eq .Status "removed")}}
+      <div class="row" data-testid="option-editor">
+        <input class="grow" name="opt_{{.ID}}" type="text" value="{{.Text}}" data-testid="option-text">
+        <label class="inline-check"><input type="checkbox" name="remove_{{.ID}}" value="1"
+          {{if eq .Status "removed"}}checked{{end}} data-testid="option-remove"> remove</label>
+      </div>
+      {{end}}
+    {{end}}
+    <label for="newopt1">Add options</label>
+    <input id="newopt1" name="newopt" type="text" placeholder="new option" data-testid="new-option-1">
+    <input name="newopt" type="text" placeholder="new option" data-testid="new-option-2">
+    <input name="newopt" type="text" placeholder="new option" data-testid="new-option-3">
+    {{if $d.Pending}}<p class="hint">{{len $d.Pending}} suggested {{plural (len $d.Pending) "option is" "options are"}}
+      waiting for review on the <a href="/admin/s/{{$d.Survey.ID}}">results page</a>.</p>{{end}}
+  </div>
+
+  <div class="card">
+    <h2>Behaviour</h2>
+    <label><input type="checkbox" name="show_results" value="1" {{if $d.Survey.ShowResults}}checked{{end}}
+      data-testid="show-results"> Show the tally to respondents</label>
+    <label><input type="checkbox" name="allow_write_in" value="1" {{if $d.Survey.AllowWriteIn}}checked{{end}}
+      data-testid="allow-writein"> Let respondents suggest options (moderated before they appear)</label>
+    <label><input type="checkbox" name="allow_comment" value="1" {{if $d.Survey.AllowComment}}checked{{end}}
+      data-testid="allow-comment"> Offer a free-text comment box</label>
+    <label for="close_at">Close automatically at (optional)</label>
+    <input id="close_at" name="close_at" type="datetime-local"
+      value="{{datetimeLocal $d.Survey.CloseAt}}" data-testid="close-at">
+    <p class="hint">Times are {{localtime $d.Survey.Created}} style — the server's timezone. Leave blank to close it by hand.</p>
+  </div>
+
+  <p><button class="primary" type="submit" data-testid="save-survey">Save</button></p>
+</form>
+{{end}}

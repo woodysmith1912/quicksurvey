@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(journalctl:*)",
+      "Bash(tailscale status:*)",
+      "Bash(systemctl status:*)",
+      "Bash(systemctl is-active:*)",
+      "Bash(systemctl cat:*)",
+      "Bash(systemctl show:*)",
+      "Bash(resolvectl query:*)",
+      "Bash(resolvectl status:*)",
+      "Bash(ip route:*)",
+      "Bash(ufw status:*)",
+      "Bash(gofmt -l:*)",
+      "Bash(go vet:*)",
+      "Bash(go build ./...)",
+      "Bash(go test ./...)",
+      "Bash(gpg --list-keys:*)",
+      "Bash(gpg --list-secret-keys:*)",
+      "Bash(tmux list-sessions:*)",
+      "Bash(tmux list-windows:*)",
+      "Bash(tmux list-panes:*)",
+      "Bash(tmux capture-pane:*)"
+    ]
+  }
+}
