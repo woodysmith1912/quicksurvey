@@ -48,6 +48,19 @@ type Store struct {
 
 const dbFile = "quicksurvey.db"
 
+// MaxConns bounds the connection pool.
+//
+// One connection was the original choice, on the reasoning that writes
+// serialise anyway. That reasoning was wrong: it serialised reads too, throwing
+// away the concurrent readers WAL provides for free. BenchmarkBallot measured
+// the cost at 2.2x — 611µs per ballot at one connection against 272µs at four.
+//
+// Four rather than more, because sixteen measured *worse* than four (328µs):
+// past the point where readers overlap, the extra connections buy nothing and
+// cost scheduling. Writes still serialise, which is correct and is what
+// _txlock=immediate and busy_timeout handle.
+var MaxConns = 4
+
 // Open prepares dir as a data directory, creating it and the database if
 // necessary.
 func Open(dir string) (*Store, error) {
@@ -79,10 +92,14 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// One connection. Writes to SQLite serialise anyway, the workload is a map
-	// lookup and a template, and a single connection removes every in-process
-	// SQLITE_BUSY as a class rather than papering over it with retries.
-	db.SetMaxOpenConns(1)
+	// Reads and writes share this pool. WAL lets many readers run at once
+	// alongside one writer, so a pool of one throws away concurrency SQLite
+	// offers for free — but writes still have to serialise, which is what
+	// _txlock=immediate and busy_timeout above are for.
+	//
+	// MaxConns exists so this can be measured rather than argued about; see
+	// BenchmarkBallot.
+	db.SetMaxOpenConns(MaxConns)
 	db.SetConnMaxLifetime(0)
 
 	if err := db.Ping(); err != nil {

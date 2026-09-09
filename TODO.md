@@ -25,6 +25,13 @@
 - [x] DNS delegated to DigitalOcean and propagated; wildcard plus an explicit
       record, and mail records saying the domain sends and receives nothing.
 
+## Next
+- [ ] FIX  `Tally` runs on every ballot GET when a survey shows results to
+      respondents, walking every response row: 16.3ms and 2.7MB per request at
+      1,000 respondents against 0.65ms without. It grows linearly with the
+      survey. Cache the tally per survey and invalidate it on write, or
+      aggregate in SQL rather than in Go. `BenchmarkBallot` measures it.
+
 ## Improvements
 - [x] The front page is a splash that explains the site; the sign-in link sits
       quietly at the top right.
