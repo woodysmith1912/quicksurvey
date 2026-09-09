@@ -1,0 +1,20 @@
+{{define "content"}}
+{{$d := .Data}}
+<h1>Choose a new password</h1>
+<p>for <strong data-testid="reset-user">{{$d.Reset.User}}</strong>, at the request of
+  {{$d.Reset.CreatedBy}}.</p>
+<p class="hint">Nobody else sees what you type here — not even the administrator who sent
+  the link. It can only be used once, and signing in elsewhere ends when you submit it.</p>
+
+<form method="post" action="/reset/{{$d.Token}}" class="card">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label for="password">New password</label>
+  <input id="password" name="password" type="password" autocomplete="new-password"
+         minlength="8" required data-testid="reset-password">
+  <p class="hint">At least 8 characters.</p>
+  <label for="confirm">Repeat new password</label>
+  <input id="confirm" name="confirm" type="password" autocomplete="new-password"
+         minlength="8" required data-testid="reset-confirm">
+  <p><button class="primary" type="submit" data-testid="reset-submit">Set my password</button></p>
+</form>
+{{end}}

@@ -323,6 +323,13 @@ type usersData struct {
 	// NewInvite is a freshly minted link, shown exactly once immediately after
 	// it is created. It is never stored anywhere it could be read again.
 	NewInvite string
+	// Resets holds outstanding reset links by username, so the page can say
+	// one is already out there rather than quietly replacing it.
+	Resets map[string]*store.Reset
+	// NewReset is a freshly minted reset link and the account it belongs to,
+	// rendered once, directly from the request that created it.
+	NewReset     string
+	NewResetUser string
 }
 
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
@@ -336,6 +343,35 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	if tok := r.FormValue("new_invite"); tok != "" {
 		d.NewInvite = s.baseURL(r) + "/invite/" + url.PathEscape(tok)
 	}
+	d.Resets = map[string]*store.Reset{}
+	for _, u := range d.Users {
+		if rp, ok := s.store.OutstandingReset(u.Name); ok {
+			d.Resets[u.Name] = rp
+		}
+	}
+	s.render(w, r, http.StatusOK, "users.html", "Accounts", d)
+}
+
+// renderUsersWithReset shows a freshly minted reset link exactly once, from the
+// request that created it. Unlike the invitation flow it does not redirect with
+// the token in a query string, which would put the secret into browser history
+// and the proxy's access log.
+func (s *Server) renderUsersWithReset(w http.ResponseWriter, r *http.Request, user, token string) {
+	all := s.store.Users()
+	d := usersData{Pending: s.store.PendingUsers(), Invites: s.store.Invites(), Now: time.Now()}
+	for _, u := range all {
+		if !u.Pending {
+			d.Users = append(d.Users, u)
+		}
+	}
+	d.Resets = map[string]*store.Reset{}
+	for _, u := range d.Users {
+		if rp, ok := s.store.OutstandingReset(u.Name); ok {
+			d.Resets[u.Name] = rp
+		}
+	}
+	d.NewReset = s.baseURL(r) + "/reset/" + url.PathEscape(token)
+	d.NewResetUser = user
 	s.render(w, r, http.StatusOK, "users.html", "Accounts", d)
 }
 
@@ -350,6 +386,15 @@ func (s *Server) handleUsersPost(w http.ResponseWriter, r *http.Request) {
 	var msg string
 
 	switch r.FormValue("action") {
+	case "reset-link":
+		_, token, err := s.store.CreateReset(name, me.Name)
+		if err != nil {
+			s.setFlash(w, err.Error(), true)
+			break
+		}
+		s.cfg.Logger.Info("password reset link created", "for", name, "by", me.Name)
+		s.renderUsersWithReset(w, r, name, token)
+		return
 	case "approve":
 		err = s.store.ApproveUser(name, store.Role(r.FormValue("role")))
 		msg = name + " approved as " + r.FormValue("role") + "."
@@ -370,12 +415,15 @@ func (s *Server) handleUsersPost(w http.ResponseWriter, r *http.Request) {
 		}
 		err = s.store.SetRole(name, store.Role(r.FormValue("role")))
 		msg = "Role updated for " + name + "."
-	case "password":
-		err = s.store.SetPassword(name, r.FormValue("password"))
-		msg = "Password reset for " + name + ". Their existing sessions are now signed out."
 	case "delete":
 		if name == me.Name {
 			err = errors.New("you cannot delete your own account")
+			break
+		}
+		// Deleting an account cannot be undone, so make it deliberate the
+		// same way deleting a survey is: retype the name.
+		if strings.TrimSpace(r.FormValue("confirm")) != name {
+			err = errors.New("not deleted: type the username exactly to confirm")
 			break
 		}
 		err = s.store.DeleteUser(name)

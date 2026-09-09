@@ -2,6 +2,15 @@
 <h1>Accounts</h1>
 <p class="hint">Accounts exist only to manage surveys. Respondents never sign in and are never linked to an account.</p>
 
+{{with .Data.NewReset}}
+<div class="card">
+  <h2>Reset link for {{$.Data.NewResetUser}}</h2>
+  <p class="hint">Send it to them. It is shown once, works once, and expires in two hours.
+    They choose the password themselves — you never see it.</p>
+  <code class="url" data-testid="reset-url">{{.}}</code>
+</div>
+{{end}}
+
 {{with .Data.NewInvite}}
 <div class="card">
   <h2>New invitation link</h2>
@@ -68,13 +77,26 @@
       </form>
     </td>
     <td>
-      <form method="post" action="/admin/users" class="row">
+      <form method="post" action="/admin/users" class="inline">
         <input type="hidden" name="csrf" value="{{$.CSRF}}">
         <input type="hidden" name="username" value="{{.Name}}">
-        <input name="password" type="password" placeholder="new password" autocomplete="new-password">
-        <button name="action" value="password" type="submit">Reset password</button>
-        <button class="danger" name="action" value="delete" type="submit" data-testid="delete-user">Delete</button>
+        <button name="action" value="reset-link" type="submit" data-testid="reset-link">
+          {{if index $.Data.Resets .Name}}Replace reset link{{else}}Password reset link{{end}}</button>
       </form>
+      {{with index $.Data.Resets .Name}}
+        <div class="muted" data-testid="reset-outstanding">a link is outstanding until {{localtime .Expires}}</div>
+      {{end}}
+      <details>
+        <summary class="muted" data-testid="delete-user-toggle">delete account</summary>
+        <form method="post" action="/admin/users">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <input type="hidden" name="username" value="{{.Name}}">
+          <p class="hint">This cannot be undone. Type <strong>{{.Name}}</strong> to confirm.</p>
+          <input name="confirm" type="text" autocomplete="off" data-testid="delete-user-confirm">
+          <p><button class="danger" name="action" value="delete" type="submit"
+             data-testid="delete-user">Delete {{.Name}}</button></p>
+        </form>
+      </details>
     </td>
   </tr>
   {{end}}
@@ -134,6 +156,9 @@
 
 <div class="card">
   <h2>Add an account directly</h2>
+  <p class="hint">You have to choose their first password here, so send it by some other
+    channel and have them change it. Inviting by link is better: they pick their own and
+    you never see it.</p>
   <form method="post" action="/admin/users">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <input type="hidden" name="action" value="add">

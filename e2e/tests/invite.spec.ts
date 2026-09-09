@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { signIn, userRow } from '../helpers';
+import { deleteAccount, signIn, userRow } from '../helpers';
 
 /** Creates an invitation as an admin and returns the one-time link. */
 async function createInvite(page: Page, role: string, note = 'come help out') {
@@ -53,7 +53,7 @@ test.describe('invitation links', () => {
     await expect(guest.getByTestId('error')).toContainText('permission');
 
     // Cleanup so later tests see a clean account list.
-    await userRow(page, 'newbie').getByTestId('delete-user').click();
+    await deleteAccount(page, 'newbie');
     await ctx.close();
   });
 
@@ -124,6 +124,6 @@ test.describe('invitation links', () => {
     await ctx.close();
 
     await page.goto('/admin/users');
-    await userRow(page, 'ed').getByTestId('delete-user').click();
+    await deleteAccount(page, 'ed');
   });
 });

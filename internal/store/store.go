@@ -140,6 +140,19 @@ CREATE TABLE IF NOT EXISTS invites (
   revoked    INTEGER NOT NULL DEFAULT 0
 );
 
+-- Single-use password reset links, so an administrator never has to know
+-- another person's password.
+CREATE TABLE IF NOT EXISTS resets (
+  id         TEXT PRIMARY KEY,
+  digest     TEXT NOT NULL UNIQUE,
+  user_name  TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  created    TEXT NOT NULL,
+  expires    TEXT NOT NULL,
+  used       TEXT
+);
+CREATE INDEX IF NOT EXISTS resets_by_user ON resets(user_name);
+
 CREATE TABLE IF NOT EXISTS surveys (
   id              TEXT PRIMARY KEY,
   type            TEXT NOT NULL,

@@ -185,7 +185,20 @@ deletes the account. A pending admin does not count towards the "you cannot
 delete the last admin" rule.
 
 **Directly** — type a username, password and role yourself. Useful for a first
-colleague or for recovery.
+colleague or for recovery, but you then know their password, so send it by some
+other channel and have them change it.
+
+**Forgotten passwords** are handled with a link, not by an administrator setting
+one. An admin generates a single-use reset link for an account and passes it on;
+the owner chooses the password and nobody else ever sees it. An admin who can
+set a password can sign in as that person, which is a different power from
+managing accounts, and this keeps the two apart. Links last two hours, work
+once, and issuing a new one retires any outstanding link so there are never two
+ways in. Using one signs that account out everywhere, because a reset is usually
+a response to something having gone wrong.
+
+**Deleting an account** asks you to retype the username, the same guard survey
+deletion uses. There is no undo.
 
 ## Anonymity
 
