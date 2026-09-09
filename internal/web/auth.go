@@ -23,6 +23,23 @@ const (
 	voterTTL      = 365 * 24 * time.Hour
 )
 
+// cookieName applies the __Host- prefix when the cookies are Secure.
+//
+// The prefix is enforced by the browser: it will only accept such a cookie if
+// it is Secure, has Path=/ and carries no Domain. That is what stops a sibling
+// subdomain, or a plain-http:// origin on the same host, from planting a
+// qs_session (logging the victim in as the attacker) or a known qs_voter (then
+// reading the victim's choices back from the attacker's browser). The CSRF
+// token is no defence there, because it is derived from the planted cookie.
+//
+// It cannot be used without HTTPS, so the plain names remain for local use.
+func (s *Server) cookieName(base string) string {
+	if s.cfg.SecureCookies {
+		return "__Host-" + base
+	}
+	return base
+}
+
 type ctxKey int
 
 const userKey ctxKey = 1
@@ -34,7 +51,7 @@ func userFrom(ctx context.Context) *store.User {
 
 func (s *Server) cookie(name, value string, ttl time.Duration) *http.Cookie {
 	c := &http.Cookie{
-		Name:     name,
+		Name:     s.cookieName(name),
 		Value:    value,
 		Path:     "/",
 		HttpOnly: true,
@@ -63,7 +80,7 @@ func (s *Server) newSession(u *store.User) string {
 
 // sessionUser resolves the session cookie, or nil if there is no valid session.
 func (s *Server) sessionUser(r *http.Request) *store.User {
-	c, err := r.Cookie(sessionCookie)
+	c, err := r.Cookie(s.cookieName(sessionCookie))
 	if err != nil {
 		return nil
 	}
@@ -82,6 +99,19 @@ func (s *Server) sessionUser(r *http.Request) *store.User {
 	}
 	want := s.store.MAC("session", name+"|"+exp, u.SessionKey())
 	if subtle.ConstantTimeCompare([]byte(mac), []byte(want)) != 1 {
+		return nil
+	}
+	return u
+}
+
+// activeUser is sessionUser restricted to accounts that may actually act. A
+// pending or must-change-password account has a valid session — the gate is an
+// authorisation state, not a broken credential — so any code path that decides
+// access from a session must ask for this rather than sessionUser, or it
+// silently exempts itself from those gates.
+func (s *Server) activeUser(r *http.Request) *store.User {
+	u := s.sessionUser(r)
+	if u == nil || u.Pending || u.MustChangePassword {
 		return nil
 	}
 	return u
@@ -132,10 +162,10 @@ func (s *Server) requireRole(min store.Role, h http.HandlerFunc) http.Handler {
 // session for accounts, the voter token for anonymous respondents. Both are
 // HttpOnly, so a cross-site page cannot read the token it would need to forge.
 func (s *Server) csrfToken(r *http.Request) string {
-	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+	if c, err := r.Cookie(s.cookieName(sessionCookie)); err == nil && c.Value != "" {
 		return s.store.MAC("csrf", c.Value)
 	}
-	if c, err := r.Cookie(voterCookie); err == nil && c.Value != "" {
+	if c, err := r.Cookie(s.cookieName(voterCookie)); err == nil && c.Value != "" {
 		return s.store.MAC("csrf", c.Value)
 	}
 	return ""
@@ -152,23 +182,56 @@ func (s *Server) checkCSRF(r *http.Request) bool {
 
 // --- voter identity -------------------------------------------------------
 
-// voterToken returns the caller's random browser token, issuing one if this is
-// their first visit. The token is meaningless on its own: it identifies a
-// browser to itself, and only a keyed derivation of it is ever stored.
+// voterToken returns the caller's browser token, issuing one if this is their
+// first visit.
+//
+// The value is signed. Without that, a client can invent any cookie value it
+// likes and mint a fresh identity per request for free — which makes the
+// one-response-per-person rule and the per-voter write-in cap cost nothing to
+// bypass. Signing does not make identities scarce, since anyone can still ask
+// for a new one; it makes each one cost a round trip and a Set-Cookie, which is
+// what the rate limiter can then act on.
+//
+// The token is still meaningless on its own: it identifies a browser to itself,
+// and only a keyed derivation of it is ever stored.
 func (s *Server) voterToken(w http.ResponseWriter, r *http.Request) string {
-	if c, err := r.Cookie(voterCookie); err == nil && len(c.Value) >= 16 {
-		return c.Value
+	if c, err := r.Cookie(s.cookieName(voterCookie)); err == nil {
+		if tok, ok := s.verifyVoterToken(c.Value); ok {
+			return tok
+		}
+	}
+	// Minting an identity is the abusable step, so it is the metered one.
+	// Someone who already holds a valid cookie never reaches here and is never
+	// throttled, however often they vote.
+	if !s.voterLimit.allow(clientKey(r, s.cfg.TrustProxy)) {
+		s.cfg.Logger.Warn("voter identity rate limited", "path", r.URL.Path)
+		return ""
 	}
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		panic(err)
 	}
 	tok := base64.RawURLEncoding.EncodeToString(b)
-	http.SetCookie(w, s.cookie(voterCookie, tok, voterTTL))
+	signed := tok + "." + s.store.MAC("voter-cookie", tok)
+	http.SetCookie(w, s.cookie(voterCookie, signed, voterTTL))
 	// Make it visible to this request too, so the page can carry a CSRF token
 	// derived from a cookie the browser has not sent back yet.
-	r.AddCookie(&http.Cookie{Name: voterCookie, Value: tok})
+	r.AddCookie(&http.Cookie{Name: s.cookieName(voterCookie), Value: signed})
 	return tok
+}
+
+// verifyVoterToken checks a cookie value this server signed, returning the
+// token itself.
+func (s *Server) verifyVoterToken(v string) (string, bool) {
+	tok, mac, ok := strings.Cut(v, ".")
+	if !ok || len(tok) < 16 {
+		return "", false
+	}
+	want := s.store.MAC("voter-cookie", tok)
+	if subtle.ConstantTimeCompare([]byte(mac), []byte(want)) != 1 {
+		return "", false
+	}
+	return tok, true
 }
 
 // --- flash ----------------------------------------------------------------
@@ -201,15 +264,15 @@ func flashNow(r *http.Request, msg string, isErr bool) *http.Request {
 
 // takeFlash returns the message to show, preferring one set for this very
 // response and otherwise reading and clearing the redirect cookie.
-func takeFlash(w http.ResponseWriter, r *http.Request) flash {
+func (s *Server) takeFlash(w http.ResponseWriter, r *http.Request) flash {
 	if f, ok := r.Context().Value(flashKey).(flash); ok {
 		return f
 	}
-	c, err := r.Cookie(flashCookie)
+	c, err := r.Cookie(s.cookieName(flashCookie))
 	if err != nil || c.Value == "" {
 		return flash{}
 	}
-	http.SetCookie(w, &http.Cookie{Name: flashCookie, Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: s.cookieName(flashCookie), Path: "/", MaxAge: -1})
 	b, err := base64.RawURLEncoding.DecodeString(c.Value)
 	if err != nil || len(b) < 1 {
 		return flash{}
@@ -243,6 +306,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	next := safeNext(r.FormValue("next"))
 	u, ok := s.store.Authenticate(name, pw)
 	if !ok {
+		// Only failures are billed, so a busy office signing in legitimately
+		// is never throttled while a brute-force run is.
+		s.loginLimit.spend(clientKey(r, s.cfg.TrustProxy))
 		s.cfg.Logger.Warn("failed login", "user", name)
 		r = flashNow(r, "Incorrect username or password.", true)
 		s.render(w, r, http.StatusUnauthorized, "login.html", "Sign in", loginData{Next: next, Name: name})
@@ -302,11 +368,26 @@ func (s *Server) handlePasswordChange(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
 }
 
-// safeNext keeps post-login redirects on this site: an absolute or
-// protocol-relative URL from a query parameter is an open-redirect.
+// safeNext keeps post-login redirects on this site.
+//
+// Rejecting "//" is not enough. Browsers follow WHATWG's URL rules, where a
+// backslash is equivalent to a slash in an http(s) URL, so "/\evil.com" is
+// same-origin to a naive prefix check and https://evil.com/ to Chrome. That is
+// precisely the phishing aid this guard exists to prevent: a genuine-looking
+// sign-in link that hands the admin to a clone afterwards.
 func safeNext(next string) string {
-	if strings.HasPrefix(next, "/") && !strings.HasPrefix(next, "//") {
-		return next
+	if next == "" || !strings.HasPrefix(next, "/") {
+		return ""
 	}
-	return ""
+	if strings.ContainsAny(next, "\\") {
+		return ""
+	}
+	u, err := url.Parse(next)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" {
+		return ""
+	}
+	if !strings.HasPrefix(u.Path, "/") || strings.HasPrefix(u.Path, "//") {
+		return ""
+	}
+	return next
 }

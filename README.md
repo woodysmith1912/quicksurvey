@@ -185,17 +185,27 @@ colleague or for recovery.
 ## Anonymity
 
 Nothing identifying is recorded with a response — no account, no IP address, no
-user agent, no timestamp beyond when the response was written.
+user agent, and no timestamp beyond when the response was written.
 
 Repeat voting is deterred with a cookie. On first visit the browser is given a
 random token. What is stored is a keyed hash of that token *and* the survey ID,
 so the same browser looks like a different person on every survey, and no
 response can be traced back to a browser even by someone holding the files.
 
+**What that does not cover.** The application logs no IP, but whatever proxy or
+load balancer sits in front of it almost certainly does, and a response carries
+a timestamp. On a survey with a handful of participants, joining the two is
+trivial for anyone with access to both. Anonymity here means the application is
+not collecting identities — not that correlation is impossible for the operator.
+If you need the stronger property, strip timestamps from the proxy logs, or do
+not run one.
+
 This stops casual double voting — reloading, or clicking submit twice. It does
-not stop a private window or a second browser, and is not intended to. Repeat
-submissions replace the earlier answer rather than being rejected, so a misclick
-is fixable and counts still cannot be inflated.
+not stop a private window, a second browser, or anyone willing to edit a cookie,
+and is not intended to. Repeat submissions replace the earlier answer rather
+than being rejected, so a misclick is fixable; a determined person can still
+inflate a count, and there is no rate limit in the application to slow them
+down.
 
 ## Command line
 

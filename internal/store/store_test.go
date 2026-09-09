@@ -450,3 +450,37 @@ func TestBackupProducesAUsableDatabase(t *testing.T) {
 		t.Error("the instance key did not survive the backup; returning respondents would look new")
 	}
 }
+
+// The form's maxlength is a suggestion to a browser. An anonymous write-in
+// arrives straight from a POST body.
+func TestOptionTextIsCappedServerSide(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Pizza")
+	huge := strings.Repeat("x", MaxOptionText+1)
+
+	if _, err := s.AddWriteIn(sv.ID, s.VoterID(sv.ID, "spammer"), huge); err == nil {
+		t.Error("a write-in longer than the cap was accepted")
+	}
+	if _, err := s.UpdateSurvey(sv.ID, func(d *Survey) error {
+		_, err := AddOption(d, huge, OptApproved, "editor")
+		return err
+	}); err == nil {
+		t.Error("an editor option longer than the cap was accepted")
+	}
+	if _, err := s.UpdateSurvey(sv.ID, func(d *Survey) error {
+		return SetOptionText(d, sv.Options[0].ID, huge)
+	}); err == nil {
+		t.Error("renaming an option past the cap was accepted")
+	}
+	// Nothing oversized reached the database.
+	got, _ := s.Survey(sv.ID)
+	for _, o := range got.Options {
+		if len(o.Text) > MaxOptionText {
+			t.Errorf("stored option of %d characters", len(o.Text))
+		}
+	}
+	// Exactly at the cap is still fine.
+	if _, err := s.AddWriteIn(sv.ID, s.VoterID(sv.ID, "ok"), strings.Repeat("y", MaxOptionText)); err != nil {
+		t.Errorf("a write-in exactly at the cap was rejected: %v", err)
+	}
+}

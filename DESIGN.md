@@ -18,7 +18,7 @@ Two audiences, one binary:
 |---|---|
 | Go, single container | One static binary; templates and CSS embedded with `embed.FS`, zone database compiled in with `time/tzdata`. `CGO_ENABLED=0` throughout, which is why the SQLite driver is `modernc.org/sqlite` rather than the cgo one |
 | No database | State is files under one data directory, mirrored in memory |
-| Responses anonymous | Nothing identifying is stored — no account link, no IP, no user agent |
+| Responses anonymous | Nothing identifying is stored — no account link, no IP, no user agent. The proxy in front still logs one; see below |
 | Cookies deter repeat voting | A random browser token, keyed and hashed per survey before storage |
 | Export to Google Sheets | TSV, because Sheets imports it without a dialect prompt |
 | Behind a reverse proxy | Plain HTTP inside the container; `Secure` cookies; honours `X-Forwarded-*` |
@@ -123,8 +123,21 @@ the data directory. And the token cannot be recovered from a stored response, so
 the data directory cannot be turned back into a list of browsers.
 
 This stops someone voting twice by reloading the page. It does not stop a
-private window, a second browser, or a cleared cookie jar — and it is not meant
-to. Anything stronger needs identity, which the requirement rules out.
+private window, a second browser, a cleared cookie jar, or a client that simply
+invents a cookie value — `voterToken` accepts any token the browser presents.
+Anything stronger needs identity, which the requirement rules out.
+
+Two limits worth stating plainly, because the property being sold here is
+anonymity and a guarantee that does not hold is worse than no guarantee:
+
+- **Counts can be inflated by a determined person.** Minting fresh cookie values
+  costs nothing, and there is no rate limit in the application. The cookie
+  deters accidents, not attackers.
+- **The operator can usually de-anonymise.** The application stores no IP, but
+  the reverse proxy logs one alongside a request time, and responses carry a
+  timestamp. At the scale these surveys run at, lining the two up is easy for
+  anyone holding both. The honest claim is that the application does not collect
+  identities, not that correlation is impossible.
 
 Repeat submissions **replace** the previous answer rather than being refused, so
 a misclick is fixable and the count still cannot be inflated.

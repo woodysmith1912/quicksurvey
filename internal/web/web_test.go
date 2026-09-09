@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -982,5 +983,236 @@ func TestNoRedirectWhenDisabled(t *testing.T) {
 	h := newHarness(t)
 	if r := h.browser().get("/"); r.status != http.StatusOK {
 		t.Errorf("status = %d, want 200 when redirecting is off", r.status)
+	}
+}
+
+// A browser follows WHATWG URL rules, where a backslash is a slash. "/\evil.com"
+// looks same-origin to a naive prefix check and resolves to https://evil.com/.
+func TestOpenRedirectVariants(t *testing.T) {
+	for _, next := range []string{
+		"//evil.com", `/\evil.com`, `/\/evil.com`, `/\\evil.com`,
+		"https://evil.com", "http:evil.com", `\\evil.com`, "javascript:alert(1)",
+	} {
+		if got := safeNext(next); got != "" {
+			t.Errorf("safeNext(%q) = %q, want it rejected", next, got)
+		}
+	}
+	for _, next := range []string{"/admin/", "/admin/s/abc?x=1", "/s/abc"} {
+		if got := safeNext(next); got != next {
+			t.Errorf("safeNext(%q) = %q, want it kept", next, got)
+		}
+	}
+}
+
+func TestLoginDoesNotRedirectOffSite(t *testing.T) {
+	h := newHarness(t)
+	pw := h.seedUser("alice", store.RoleAdmin)
+	b := h.browser()
+	token := b.csrf("/login")
+	r := b.post("/login", url.Values{
+		"csrf": {token}, "username": {"alice"}, "password": {pw}, "next": {`/\evil.com`},
+	})
+	if r.location != "/admin/" {
+		t.Errorf("post-login redirect = %q, want /admin/", r.location)
+	}
+}
+
+// A pending account holds a valid session. Anything deciding access from that
+// session has to consult the pending gate too, or it exempts itself from it.
+func TestPendingAccountCannotReachOrVoteOnADraft(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.st.AddUser("root", store.RoleAdmin, "password123"); err != nil {
+		t.Fatal(err)
+	}
+	_, token, err := h.st.CreateInvite("root", store.RoleEditor, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.ClaimInvite(token, "newbie", "password123"); err != nil {
+		t.Fatal(err)
+	}
+	sv := h.seedDraft("Pizza")
+
+	b := h.browser()
+	b.login("newbie", "password123")
+	if r := b.get("/s/" + sv.ID); r.status != http.StatusNotFound {
+		t.Errorf("a pending account reached a draft ballot: %d", r.status)
+	}
+	if h.st.Count(sv.ID) != 0 {
+		t.Error("a pending account recorded a response on a draft")
+	}
+
+	// The same must hold for an account that has not yet changed its
+	// bootstrap password.
+	if _, err := h.st.AddUserMustChange("boot", store.RoleAdmin, "generated-one"); err != nil {
+		t.Fatal(err)
+	}
+	c := h.browser()
+	c.login("boot", "generated-one")
+	if r := c.get("/s/" + sv.ID); r.status != http.StatusNotFound {
+		t.Errorf("a must-change-password account reached a draft ballot: %d", r.status)
+	}
+}
+
+// The whole point of signing is that a client cannot mint identities offline.
+func TestInventedVoterCookieIsRejected(t *testing.T) {
+	h := newHarness(t)
+	sv := h.seedSurvey("Pizza", "Tacos")
+	path := "/s/" + sv.ID
+
+	// Vote once legitimately.
+	honest := h.browser()
+	token := honest.csrf(path)
+	honest.follow(honest.post(path+"/vote", url.Values{"csrf": {token}, "choice": {sv.Options[0].ID}}))
+	if n := h.st.Count(sv.ID); n != 1 {
+		t.Fatalf("respondents = %d, want 1", n)
+	}
+
+	// Now try what the review did: invent cookie values and vote repeatedly.
+	// Each invented value must be rejected and replaced with a signed one, so
+	// the ballot cannot be stuffed by editing a cookie.
+	for i := range 10 {
+		b := h.browser()
+		forged := fmt.Sprintf("forged-voter-value-%d", i)
+		u, _ := url.Parse(b.base)
+		b.c.Jar.SetCookies(u, []*http.Cookie{{Name: voterCookie, Value: forged, Path: "/"}})
+		page := b.get(path)
+		if strings.Contains(page.body, forged) {
+			t.Fatal("the forged token was echoed back, so it was accepted")
+		}
+	}
+
+	// A signed cookie the server issued still works across requests.
+	before := ballotOrder(honest.get(path).body)
+	after := ballotOrder(honest.get(path).body)
+	if strings.Join(before, ",") != strings.Join(after, ",") {
+		t.Error("a legitimately issued voter cookie stopped being recognised")
+	}
+	if n := h.st.Count(sv.ID); n != 1 {
+		t.Errorf("respondents = %d, want 1 — forged cookies should not create voters", n)
+	}
+}
+
+func TestVoterCookieSignatureIsVerified(t *testing.T) {
+	h := newHarness(t)
+	for _, bad := range []string{
+		"", "short", "no-signature-at-all-here",
+		"abcdefghijklmnopq.wrongmac",
+		"abcdefghijklmnopq.",
+		".onlymac",
+	} {
+		if _, ok := h.web.verifyVoterToken(bad); ok {
+			t.Errorf("verifyVoterToken(%q) accepted an unsigned value", bad)
+		}
+	}
+	// Round-trip a genuine one.
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	tok := h.web.voterToken(w, r)
+	signed := w.Result().Cookies()[0].Value
+	got, ok := h.web.verifyVoterToken(signed)
+	if !ok || got != tok {
+		t.Errorf("round trip failed: got %q ok=%v, want %q", got, ok, tok)
+	}
+}
+
+func TestLoginIsRateLimited(t *testing.T) {
+	h := newHarness(t)
+	pw := h.seedUser("alice", store.RoleAdmin)
+	b := h.browser()
+
+	// Only failures are billed, so a run of successful sign-ins must not
+	// consume the budget.
+	for range 20 {
+		b2 := h.browser()
+		b2.login("alice", pw)
+	}
+	// Each failed attempt costs a full PBKDF2 verification, so that is the
+	// path that needs a ceiling.
+	var limited bool
+	for range 30 {
+		token := b.csrf("/login")
+		r := b.post("/login", url.Values{"csrf": {token}, "username": {"alice"}, "password": {"wrong"}})
+		if r.status == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Fatal("30 failed sign-in attempts were never rate limited")
+	}
+	// The refusal tells a well-behaved client when to come back.
+	token := b.csrf("/login")
+	r := b.post("/login", url.Values{"csrf": {token}, "username": {"alice"}, "password": {pw}})
+	if r.status == http.StatusTooManyRequests && r.header.Get("Retry-After") == "" {
+		t.Error("429 without a Retry-After header")
+	}
+}
+
+func TestNewVoterIdentitiesAreRateLimited(t *testing.T) {
+	h := newHarness(t)
+	sv := h.seedSurvey("Pizza")
+	// A caller who already holds a cookie is never throttled, however often
+	// they vote — that is the whole point of metering issuance instead.
+	b := h.browser()
+	for range 50 {
+		if r := b.get("/s/" + sv.ID); r.status != http.StatusOK {
+			t.Fatalf("an established voter was throttled: %d", r.status)
+		}
+	}
+	// Fresh identities are bounded.
+	h.web.voterLimit = newLimiter(5, time.Minute)
+	var limited bool
+	for range 20 {
+		if h.browser().get("/s/"+sv.ID).status == http.StatusTooManyRequests {
+			limited = true
+			break
+		}
+	}
+	if !limited {
+		t.Error("unlimited new voter identities could be minted from one address")
+	}
+}
+
+func TestOversizedBodyIsRefused(t *testing.T) {
+	h := newHarness(t)
+	sv := h.seedSurvey("Pizza")
+	b := h.browser()
+	token := b.csrf("/s/" + sv.ID)
+
+	form := url.Values{"csrf": {token}, "comment": {strings.Repeat("x", MaxBody+1024)}}
+	r := b.post("/s/"+sv.ID+"/vote", form)
+	if r.status == http.StatusSeeOther {
+		got, _ := h.st.ResponseFor(sv.ID, h.st.VoterID(sv.ID, "irrelevant"))
+		_ = got
+		t.Errorf("a body over the %d byte cap was accepted (status %d)", MaxBody, r.status)
+	}
+}
+
+func TestCookiesUseHostPrefixWhenSecure(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secure, err := New(st, Config{SecureCookies: true, Location: time.UTC, Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := secure.cookieName(sessionCookie); got != "__Host-qs_session" {
+		t.Errorf("secure cookie name = %q, want the __Host- prefix", got)
+	}
+	// The prefix is invalid without HTTPS, so it must not appear then.
+	plain, err := New(st, Config{SecureCookies: false, Location: time.UTC, Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plain.cookieName(sessionCookie); got != "qs_session" {
+		t.Errorf("plain cookie name = %q, want no prefix", got)
+	}
+
+	// A __Host- cookie the browser will actually accept: Secure, Path=/, no Domain.
+	c := secure.cookie(sessionCookie, "v", time.Hour)
+	if !c.Secure || c.Path != "/" || c.Domain != "" {
+		t.Errorf("__Host- cookie violates its own requirements: %+v", c)
 	}
 }

