@@ -198,9 +198,21 @@ func (s *Store) SetPassword(name, password string) error {
 	if err != nil {
 		return err
 	}
-	res, err := s.db.Exec(
-		`UPDATE users SET hash = ?, must_change_password = 0 WHERE name = ?`, hash, name)
-	if err := affectedOne(res, err, name); err != nil {
+	err = s.tx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE users SET hash = ?, must_change_password = 0 WHERE name = ?`, hash, name)
+		if err := affectedOne(res, err, name); err != nil {
+			return err
+		}
+		// A reset link outstanding for this account is now a credential that
+		// outlives its reason for existing: someone changed the password by
+		// another route, and the link would still set a different one.
+		_, err = tx.Exec(
+			`UPDATE resets SET used = ? WHERE user_name = ? AND used IS NULL`,
+			dbTime(time.Now().UTC()), name)
+		return err
+	})
+	if err != nil {
 		return err
 	}
 	// Whatever the bootstrap password was, it is no longer the way in.

@@ -304,6 +304,38 @@ is the entire product. `TestTallyCacheIsInvalidatedByEveryWritePath` walks each
 of those paths and insists the next read reflects it, and a concurrent test
 hammers reads against writes under `-race`.
 
+## Testing orders of operations
+
+Most of the defects found in this codebase were not unexecuted lines. They were
+sequences: two features each correct alone, interleaved in an order nobody had
+walked through. Coverage cannot find those — the code is already covered — so
+`internal/store/ordering_test.go` and `option_edit_test.go` exist to enumerate
+them deliberately.
+
+The state machines worth interleaving:
+
+| Entity | States |
+|---|---|
+| survey | draft → open → closed → open, with responses and moderation in between |
+| option | approved ⇄ removed, pending → approved/rejected/merged, merged → its target's states |
+| response | absent → submitted → resubmitted, against options that changed underneath |
+| account | invited → pending → approved → role changed → deleted, with a live session |
+| link | created → claimed/revoked/expired/superseded, against an account that may change |
+
+Found this way rather than by coverage:
+
+- A resubmission deleted votes for options the respondent could no longer see,
+  so removing and restoring an option lost votes from anyone who resubmitted
+  meanwhile, and one resubmission undid a merge.
+- `Publish` discards a draft's preview responses and asked `FirstOpenedAt`
+  whether the survey had ever been open — a field only `Publish` maintained. Any
+  other route to the open state left it unset, and the next publish deleted real
+  answers. `saveSurvey` now stamps it, so the guard cannot be bypassed by a code
+  path that does not know about it.
+- A password reset link stayed live after the password was changed by another
+  route, leaving a second person able to choose it. Setting a password by any
+  route now retires outstanding links.
+
 ## Migrations
 
 `CREATE TABLE IF NOT EXISTS` does nothing at all to a table that already exists,

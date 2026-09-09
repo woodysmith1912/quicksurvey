@@ -255,6 +255,15 @@ func loadSurvey(q queryer, id string) (*Survey, error) {
 // than replaced, because responses reference them and an ID must never be
 // reused for different text.
 func saveSurvey(tx *sql.Tx, sv *Survey) error {
+	// Publish destroys a draft's preview responses, and decides whether to by
+	// asking whether the survey has ever been open. That guard is only worth
+	// anything if FirstOpenedAt is set by *every* route to the open state, not
+	// just by Publish — otherwise a survey opened some other way looks like a
+	// never-published draft and its real responses are deleted. Stamping it
+	// here, where every write passes, is what makes that impossible.
+	if sv.State == StateOpen && sv.FirstOpenedAt.IsZero() {
+		sv.FirstOpenedAt = time.Now().UTC()
+	}
 	if _, err := tx.Exec(
 		`INSERT INTO surveys (`+surveyColumns+`)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
