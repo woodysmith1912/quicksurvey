@@ -322,6 +322,24 @@ The state machines worth interleaving:
 | account | invited → pending → approved → role changed → deleted, with a live session |
 | link | created → claimed/revoked/expired/superseded, against an account that may change |
 
+Two things were checked this way and turned out to be fine, which is worth
+recording so nobody re-derives the suspicion:
+
+- **Daylight saving does not affect closing.** A close time is entered as
+  wall-clock text, converted with `ParseInLocation` and stored as a UTC instant,
+  so the `now.Before(CloseAt)` comparison is absolute. Tests cover both
+  transitions in `America/New_York` from either side. The only residual is what
+  a wall-clock time *means* when it does not exist (02:30 on the spring-forward
+  morning) or happens twice (01:30 on the autumn one). Go resolves both without
+  complaint and the open/closed decision stays exact; there is no correct answer
+  available, since the text does not identify a single moment, and an hour on
+  two days a year does not justify a timezone control on the form.
+- **Concurrent moderation is safe.** Two administrators approving the same
+  pending account, approving while another rejects, and several people claiming
+  one invitation or reset link at the same moment all serialise correctly:
+  `_txlock=immediate` takes the write lock up front, so exactly one wins and the
+  rest are refused. Tested under `-race`.
+
 Found this way rather than by coverage:
 
 - A resubmission deleted votes for options the respondent could no longer see,
