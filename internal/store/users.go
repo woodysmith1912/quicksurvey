@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -310,6 +311,11 @@ func (s *Store) PendingUsers() []*User {
 func (s *Store) usersWhere(clause string) []*User {
 	rows, err := s.db.Query(`SELECT ` + userColumns + ` FROM users ` + clause)
 	if err != nil {
+		// Returning nil here once meant a schema mismatch looked exactly like
+		// an empty instance: no accounts, no error, nobody able to sign in and
+		// nothing saying why. A query that fails is not the same as one that
+		// matches nothing, and the difference has to be audible.
+		slog.Error("could not read accounts", "err", err, "clause", clause)
 		return nil
 	}
 	defer rows.Close()
@@ -317,9 +323,13 @@ func (s *Store) usersWhere(clause string) []*User {
 	for rows.Next() {
 		u, err := scanUser(rows)
 		if err != nil {
+			slog.Error("could not read an account row", "err", err)
 			return out
 		}
 		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("could not read accounts", "err", err)
 	}
 	return out
 }

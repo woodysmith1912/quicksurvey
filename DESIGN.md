@@ -211,6 +211,29 @@ session for accounts, the voter token for respondents. Both cookies are
 `HttpOnly`, so a cross-site page cannot read the token it would need to forge a
 request.
 
+## Migrations
+
+`CREATE TABLE IF NOT EXISTS` does nothing at all to a table that already exists,
+including adding a column to it. A column added in a later version therefore
+never appears in a database created by an earlier one, every `SELECT` naming it
+fails, and — because a failed query returned nil — the application reported *no
+accounts* rather than an error.
+
+That shipped. 0.2.0 could not read its own users table on an existing database,
+so nobody could sign in and nothing said why. Respondents were unaffected, since
+voting never reads accounts, which is what made it quiet.
+
+Two changes came out of it. Columns added after a table first shipped are listed
+in `addedColumns` and applied with `ALTER TABLE ... ADD COLUMN` when missing, so
+they belong in that list as well as in the schema text. And a query that fails
+is now logged at ERROR rather than returning nil silently: a failed query is not
+the same as one matching nothing, and the difference has to be audible.
+
+`TestUpgradeFromAnEarlierSchema` builds a database with the previous release's
+schema and opens it, and `TestEveryQueriedColumnExistsAfterMigration` runs every
+query the application issues. Both fail if a future column is added to the
+schema text and not to `addedColumns`.
+
 ## Invitations and approval
 
 Adding an administrator has two halves, deliberately, so neither one alone is
