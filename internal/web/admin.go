@@ -386,6 +386,13 @@ func (s *Server) handleUsersPost(w http.ResponseWriter, r *http.Request) {
 	var msg string
 
 	switch r.FormValue("action") {
+	case "add":
+		// Deliberately absent. Choosing someone's first password means being
+		// able to sign in as them, which is exactly the power that handing out
+		// a reset link avoids. Invitations are the only way in from the web;
+		// the CLI can still do it, and needs a shell in the container.
+		err = errors.New("accounts are created by invitation, so that nobody else " +
+			"ever knows the password. Use \"Invite someone by link\" below.")
 	case "reset-link":
 		_, token, err := s.store.CreateReset(name, me.Name)
 		if err != nil {
@@ -405,9 +412,6 @@ func (s *Server) handleUsersPost(w http.ResponseWriter, r *http.Request) {
 		}
 		err = s.store.DeleteUser(name)
 		msg = "Request from " + name + " rejected and the account removed."
-	case "add":
-		_, err = s.store.AddUser(name, store.Role(r.FormValue("role")), r.FormValue("password"))
-		msg = "Account " + name + " created."
 	case "role":
 		if name == me.Name {
 			err = errors.New("you cannot change your own role")

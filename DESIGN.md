@@ -339,7 +339,10 @@ leaves responses alone, so closing and reopening a live survey is safe.
 
 ## Password resets
 
-An administrator can hand out a reset link. They cannot set a password.
+An administrator can hand out a reset link. They cannot set a password, and
+cannot create an account with one either — the two are the same power wearing
+different hats, since both end with someone else knowing a credential that signs
+in as you.
 
 The distinction matters more than it looks: an admin who sets a password can
 then sign in as that person, which is a different and larger power than managing

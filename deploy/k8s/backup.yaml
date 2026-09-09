@@ -74,7 +74,17 @@ spec:
               type: RuntimeDefault
           containers:
             - name: snapshot
-              image: bitnami/kubectl:1.33
+              # Needs kubectl *and* a shell, since the script below builds a
+              # timestamped snapshot and prunes old ones.
+              #
+              # Two wrong answers were tried first. bitnami/kubectl:1.33 does
+              # not exist — Bitnami moved their free catalogue in 2025 — which
+              # showed up only as ImagePullBackOff on a job nobody was watching,
+              # and sat broken for 41 minutes. registry.k8s.io/kubectl is the
+              # official image but is distroless, so `command: ["/bin/sh"]`
+              # cannot start: the same missing-shell trap the application image
+              # keeps setting.
+              image: alpine/k8s:1.33.0
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

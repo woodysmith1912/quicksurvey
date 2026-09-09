@@ -1,6 +1,36 @@
 import { expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { ADMIN } from './env';
 
+/**
+ * Creates an account the only way the web offers: an invitation the admin
+ * mints and the invitee claims, choosing their own password. There is no form
+ * for an admin to set someone's first password, deliberately.
+ */
+export async function inviteAndClaim(
+  page: Page, browser: Browser, name: string, password: string, role: string,
+) {
+  await page.goto('/admin/users');
+  await page.getByTestId('invite-role').selectOption(role);
+  await page.getByTestId('create-invite').click();
+  const link = (await page.getByTestId('invite-url').innerText()).trim();
+
+  const ctx = await browser.newContext();
+  const guest = await ctx.newPage();
+  await guest.goto(link);
+  await guest.getByTestId('invite-username').fill(name);
+  await guest.getByTestId('invite-password').fill(password);
+  await guest.getByTestId('invite-confirm').fill(password);
+  await guest.getByTestId('invite-submit').click();
+  await ctx.close();
+
+  // Approve them, with the role the invitation suggested.
+  await page.goto('/admin/users');
+  const row = page.locator(`[data-testid="pending-user"][data-user="${name}"]`);
+  await row.getByTestId('approve-role').selectOption(role);
+  await row.getByTestId('approve-user').click();
+  await expect(page.getByTestId('flash')).toContainText('approved');
+}
+
 /** Signs in on the given page. Defaults to the seeded administrator. */
 export async function signIn(page: Page, user = ADMIN.user, password = ADMIN.password) {
   await page.goto('/login');

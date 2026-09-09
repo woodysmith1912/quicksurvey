@@ -186,9 +186,11 @@ which need not be the one the invitation suggested — or rejects it, which
 deletes the account. A pending admin does not count towards the "you cannot
 delete the last admin" rule.
 
-**Directly** — type a username, password and role yourself. Useful for a first
-colleague or for recovery, but you then know their password, so send it by some
-other channel and have them change it.
+**Directly, from the web** — no longer possible, deliberately. Choosing
+someone's first password means being able to sign in as them, which is the same
+power that handing out a reset link exists to avoid. `quicksurvey user add`
+still works from inside the container, which needs a shell there and is the way
+back in when nobody can sign in at all.
 
 **Forgotten passwords** are handled with a link, not by an administrator setting
 one. An admin generates a single-use reset link for an account and passes it on;

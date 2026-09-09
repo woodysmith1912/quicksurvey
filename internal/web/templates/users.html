@@ -155,24 +155,11 @@
 {{end}}
 
 <div class="card">
-  <h2>Add an account directly</h2>
-  <p class="hint">You have to choose their first password here, so send it by some other
-    channel and have them change it. Inviting by link is better: they pick their own and
-    you never see it.</p>
-  <form method="post" action="/admin/users">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <input type="hidden" name="action" value="add">
-    <label for="u">Username</label>
-    <input id="u" name="username" type="text" required data-testid="new-username">
-    <label for="p">Password</label>
-    <input id="p" name="password" type="password" minlength="8" required autocomplete="new-password" data-testid="new-password">
-    <label for="r">Role</label>
-    <select id="r" name="role" data-testid="new-role">
-      <option value="viewer">viewer — see results and download exports</option>
-      <option value="editor" selected>editor — also create, edit and moderate surveys</option>
-      <option value="admin">admin — also manage accounts</option>
-    </select>
-    <p><button class="primary" type="submit" data-testid="add-user">Add account</button></p>
-  </form>
+  <h2>Adding people</h2>
+  <p class="hint">Only by invitation. Choosing someone's first password would mean being able to
+    sign in as them, which is the same power that handing out a reset link exists to avoid — so
+    there is no form here for it. They pick their own password and you never see it.</p>
+  <p class="hint">If nobody can sign in at all, <code>quicksurvey user add</code> still works from
+    inside the container.</p>
 </div>
 {{end}}
