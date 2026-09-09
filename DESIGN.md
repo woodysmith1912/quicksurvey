@@ -98,9 +98,31 @@ upgrade legal; the transaction has to be discarded and retried. Taking the write
 lock up front with `BEGIN IMMEDIATE` turns an unrecoverable error into an
 ordinary wait.
 
-The pool is capped at one connection. Writes serialise regardless, the workload
-is a row lookup and a template, and one connection removes in-process
-`SQLITE_BUSY` as a category rather than papering over it with retries.
+The pool holds four connections.
+
+One was the original choice, reasoning that writes serialise anyway. That was
+wrong: it serialised *reads* too, discarding the concurrent readers WAL provides
+for free. `BenchmarkBallot` put a number on it — 611µs to serve a ballot at one
+connection, 272µs at four, a 2.2x difference for a one-line change.
+
+Four rather than more because sixteen measured *worse* than four, at 328µs. Past
+the point where readers overlap, extra connections buy nothing and cost
+scheduling. Writes still serialise, which is correct, and `_txlock=immediate`
+with `busy_timeout` is what makes that a wait rather than an error.
+
+### What the benchmark actually found
+
+| | fresh ballot | ~10 selected | +1,000 other respondents | + results shown |
+|---|---|---|---|---|
+| 1 connection | 611µs | 651µs | 653µs | 16.3ms |
+| 4 connections | 272µs | 292µs | 283µs | 4.85ms |
+
+Two things worth keeping in mind. Loading a respondent's existing answer costs
+about 40µs — the response and its choices are two indexed lookups, and the
+number of prior respondents is irrelevant to them. And showing results to
+respondents costs 25x, because `Tally` walks every response on every ballot
+load and allocates 2.7MB doing it. That is the cliff in this application: it
+grows linearly with the survey and nothing else does.
 
 **SQLite's locking is unreliable on NFS.** On a block device — which is what a
 DigitalOcean Block Storage volume is — it behaves correctly. An `RWX`
