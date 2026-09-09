@@ -18,9 +18,14 @@ See [DESIGN.md](DESIGN.md) for how it works and what its failure modes are, and
 ## Run it
 
 ```sh
-make up                                           # docker compose up -d --build
-docker compose logs quicksurvey | grep password   # the first admin password, printed once
+make up                                    # docker compose up -d --build
+docker compose exec quicksurvey \
+  cat /data/initial-password               # the first admin password
 ```
+
+It is written to a file rather than the log, because a log outlives the
+credential and is read by more people. The file is removed as soon as the
+password is changed, which the account must do at first sign-in.
 
 Then open http://localhost:8080/, sign in as `admin`, and change the password —
 the account cannot do anything else until you do.

@@ -133,9 +133,17 @@ func (s *Store) AddUser(name string, role Role, password string) (*User, error) 
 }
 
 // AddUserMustChange creates an account required to set a new password before it
-// can do anything else. Used for the bootstrap administrator.
+// can do anything else, and leaves that password in a file for collection. Used
+// for the bootstrap administrator.
 func (s *Store) AddUserMustChange(name string, role Role, password string) (*User, error) {
-	return s.addUser(name, role, password, true, false, "")
+	u, err := s.addUser(name, role, password, true, false, "")
+	if err != nil {
+		return nil, err
+	}
+	if err := s.writeInitialPassword(password); err != nil {
+		return nil, fmt.Errorf("recording the initial password: %w", err)
+	}
+	return u, nil
 }
 
 // validUsername keeps names to characters that survive every place a name is
@@ -191,7 +199,12 @@ func (s *Store) SetPassword(name, password string) error {
 	}
 	res, err := s.db.Exec(
 		`UPDATE users SET hash = ?, must_change_password = 0 WHERE name = ?`, hash, name)
-	return affectedOne(res, err, name)
+	if err := affectedOne(res, err, name); err != nil {
+		return err
+	}
+	// Whatever the bootstrap password was, it is no longer the way in.
+	s.clearInitialPassword()
+	return nil
 }
 
 // RevokeSessions invalidates every session cookie this account holds, by moving
