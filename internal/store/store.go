@@ -297,6 +297,58 @@ func newID(n int) string {
 	return string(b)
 }
 
+// InitialPasswordFile is where the bootstrap administrator's password is left
+// on a brand-new instance.
+//
+// It goes in a file rather than the log because a log is the wrong place for a
+// live credential: it is shipped to aggregators, retained long after the
+// password is changed, and readable by anyone holding `kubectl logs` on the
+// namespace — a strictly wider audience than the volume itself. The file is
+// removed the moment that password is changed.
+func (s *Store) InitialPasswordFile() string {
+	return filepath.Join(s.dir, "initial-password")
+}
+
+// writeInitialPassword records the bootstrap credential for collection.
+func (s *Store) writeInitialPassword(pw string) error {
+	return writeFileAtomic(s.InitialPasswordFile(),
+		[]byte(pw+"\n"), 0o600)
+}
+
+// clearInitialPassword removes it once it is no longer the way in.
+func (s *Store) clearInitialPassword() {
+	if err := os.Remove(s.InitialPasswordFile()); err != nil && !os.IsNotExist(err) {
+		slog.Warn("could not remove the initial password file",
+			"path", s.InitialPasswordFile(), "err", err)
+	}
+}
+
+// writeFileAtomic replaces path in one step, so a reader never sees a
+// half-written file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
 // BackupTo writes a consistent snapshot of the database to path, using SQLite's
 // own VACUUM INTO. It is safe to run against a live database, which a plain
 // file copy is not: WAL mode keeps recent commits in a side file, so copying

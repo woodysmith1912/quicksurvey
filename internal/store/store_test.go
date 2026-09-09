@@ -578,3 +578,42 @@ func TestOptionIDsAreWideAndScopedToTheirSurvey(t *testing.T) {
 		t.Errorf("another survey's write overwrote this option: %q", got.Options[0].Text)
 	}
 }
+
+// A log is the wrong place for a live credential: shipped to aggregators,
+// retained long after the password changes, readable by more people than the
+// volume is.
+func TestBootstrapPasswordGoesToAFileNotTheLog(t *testing.T) {
+	s := newStore(t)
+	const pw = "generated-at-first-start"
+	if _, err := s.AddUserMustChange("admin", RoleAdmin, pw); err != nil {
+		t.Fatal(err)
+	}
+
+	path := s.InitialPasswordFile()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("no initial password file: %v", err)
+	}
+	if strings.TrimSpace(string(b)) != pw {
+		t.Errorf("file holds %q, want the generated password", strings.TrimSpace(string(b)))
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("mode = %o, want 600 — it is a live credential", perm)
+	}
+
+	// Changing the password retires it, so the file must not outlive its use.
+	if err := s.SetPassword("admin", "something the operator chose"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("the initial password file survived the password being changed")
+	}
+	// Clearing twice is not an error; a normal password change hits this path.
+	if err := s.SetPassword("admin", "changed once more"); err != nil {
+		t.Errorf("a later password change failed: %v", err)
+	}
+}

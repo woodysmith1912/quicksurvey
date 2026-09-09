@@ -188,8 +188,9 @@ func bootstrapAdmin(st *store.Store, log *slog.Logger) error {
 		return err
 	}
 	log.Warn("no accounts existed, so a first administrator was created",
-		"username", "admin", "password", pw,
-		"note", "this password is shown once and must be changed at first sign-in")
+		"username", "admin",
+		"password_file", st.InitialPasswordFile(),
+		"note", "the password is in that file, not in this log; it is removed once changed")
 	return nil
 }
 

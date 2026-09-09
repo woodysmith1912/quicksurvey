@@ -1263,3 +1263,46 @@ func TestHSTSOnlyWhenSecure(t *testing.T) {
 		t.Errorf("HSTS = %q; must not commit sibling hostnames", got)
 	}
 }
+
+// People type passwords into the username box. Echoing the submitted string
+// into a log puts those where they persist and are widely read.
+func TestFailedLoginDoesNotLogWhatWasTyped(t *testing.T) {
+	var buf strings.Builder
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddUser("alice", store.RoleAdmin, "password123"); err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(st, Config{
+		Location: time.UTC,
+		Logger:   slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+	h := &harness{t: t, st: st, srv: ts, web: srv}
+	b := h.browser()
+
+	// A password fat-fingered into the username field.
+	const leaked = "hunter2-my-actual-password"
+	token := b.csrf("/login")
+	b.post("/login", url.Values{"csrf": {token}, "username": {leaked}, "password": {""}})
+	if strings.Contains(buf.String(), leaked) {
+		t.Errorf("the submitted username reached the log:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "<unknown>") {
+		t.Error("a failed sign-in for a non-existent account should still be logged, anonymised")
+	}
+
+	// A real account is named, because knowing which account is under attack
+	// is the part with operational value.
+	token = b.csrf("/login")
+	b.post("/login", url.Values{"csrf": {token}, "username": {"alice"}, "password": {"wrong"}})
+	if !strings.Contains(buf.String(), "user=alice") {
+		t.Error("a failed sign-in against a real account should name it")
+	}
+}

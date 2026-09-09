@@ -309,7 +309,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// Only failures are billed, so a busy office signing in legitimately
 		// is never throttled while a brute-force run is.
 		s.loginLimit.spend(clientKey(r, s.cfg.TrustProxy))
-		s.cfg.Logger.Warn("failed login", "user", name)
+		// Log the name only when it is a real account. People routinely type
+		// a password into the username field — a tab landing wrong, a
+		// password manager filling one box — and echoing the submitted string
+		// puts those into the log, where they persist and are read by more
+		// people than the database is. Knowing *which* account is being
+		// attacked is the part with operational value, and an unknown name
+		// carries none.
+		who := "<unknown>"
+		if _, exists := s.store.User(name); exists {
+			who = name
+		}
+		s.cfg.Logger.Warn("failed login", "user", who)
 		r = flashNow(r, "Incorrect username or password.", true)
 		s.render(w, r, http.StatusUnauthorized, "login.html", "Sign in", loginData{Next: next, Name: name})
 		return

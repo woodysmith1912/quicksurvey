@@ -67,13 +67,16 @@ gh attestation verify oci://ghcr.io/woodysmith1912/quicksurvey:v0.1.0 \
 ```
 
 **3. Get the first password.** On first start with no accounts, the app creates
-`admin` with a random password and prints it once:
+`admin` with a random password and writes it to a file on the volume:
 
 ```sh
-kubectl -n quicksurvey logs statefulset/quicksurvey | grep password
+kubectl -n quicksurvey exec quicksurvey-0 -- cat /data/initial-password
 ```
 
-It must be changed at first sign-in before the account can do anything.
+Not the log. A log is shipped to aggregators, kept long after the password is
+changed, and readable by anyone with `kubectl logs` on the namespace — a wider
+audience than the volume. The file is mode 600 and is deleted the moment the
+password is changed, which the account is forced to do at first sign-in.
 
 ## Changing the hostname
 
