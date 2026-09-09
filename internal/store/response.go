@@ -137,6 +137,36 @@ func saveResponseTx(tx *sql.Tx, surveyID, voter string, choices []string, commen
 		seen[id] = true
 		r.Choices = append(r.Choices, id)
 	}
+	// Carry forward selections the respondent could not see.
+	//
+	// A submission says what someone chose from the ballot in front of them,
+	// and that ballot holds approved options plus their own pending write-ins.
+	// Anything else they had selected — an option an editor has since removed,
+	// or one a moderator merged into another — is absent from the form, so
+	// taking the submission literally deletes it.
+	//
+	// That was silent and lossy. Removing an option and restoring it preserves
+	// its votes, but only from people who happened not to resubmit in between;
+	// and a merge transfers votes through Resolve, which one later resubmission
+	// would undo. Neither leaves a trace in the count.
+	if prev != nil {
+		for _, id := range prev.Choices {
+			if seen[id] {
+				continue
+			}
+			o, ok := sv.Option(id)
+			if !ok {
+				continue
+			}
+			visible := o.Status == OptApproved ||
+				(o.Status == OptPending && (id == allowPending || prev.Chose(id)))
+			if !visible {
+				seen[id] = true
+				r.Choices = append(r.Choices, id)
+			}
+		}
+	}
+
 	if sv.AllowComment {
 		if comment = strings.TrimSpace(comment); len(comment) > MaxComment {
 			comment = comment[:MaxComment]

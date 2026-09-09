@@ -205,6 +205,32 @@ never deleted from a survey. Its `status` changes instead:
   vote lands on the target
 
 That last one is why merging is cheap: no stored response is ever rewritten.
+
+### Editing a survey people have already answered
+
+The ballot shows approved options and the respondent's own pending write-ins.
+Anything else they had selected — an option since removed, or one merged into
+another — is not on it, so a submission does not mention it.
+
+Taking that submission literally deletes those selections, which was the
+behaviour and was wrong in a way nothing surfaced. Removing an option and
+restoring it preserves its votes, but only from people who happened not to
+resubmit in between; and a merge moves votes through `Resolve` rather than by
+rewriting responses, so one later resubmission undid the transfer. Either way
+the count silently dropped.
+
+A submission now only affects options the respondent could see. Choices they
+could not see are carried forward untouched, so:
+
+| Editor does | Then |
+|---|---|
+| renames an option | votes follow it; the ID never changes |
+| removes one | it leaves the tally, responses keep referencing it |
+| restores it | every vote comes back, including from people who resubmitted meanwhile |
+| merges one | votes resolve to the target and survive resubmission |
+
+Deselecting something visible still works, which is the other half of the
+property and is tested alongside it.
 `Resolve` is bounded by the option count, so a cyclic merge chain (which the
 moderation handler already refuses to create) resolves to "not counted" rather
 than looping.
