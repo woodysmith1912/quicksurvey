@@ -617,3 +617,77 @@ func TestBootstrapPasswordGoesToAFileNotTheLog(t *testing.T) {
 		t.Errorf("a later password change failed: %v", err)
 	}
 }
+
+// The image has no tar, so kubectl cp cannot work, and no shell to redirect
+// with. Streaming is the only way a backup leaves the container.
+func TestBackupCanStreamToAWriter(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.AddUser("alice", RoleAdmin, "password123"); err != nil {
+		t.Fatal(err)
+	}
+	sv := mustSurvey(t, s, "Pizza", "Tacos")
+	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, "hi"); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	out := filepath.Join(dir, dbFile)
+	f, err := os.Create(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BackupToWriter(f); err != nil {
+		t.Fatalf("BackupToWriter: %v", err)
+	}
+	f.Close()
+
+	// What came out is a working database, not just bytes.
+	restored, err := Open(dir)
+	if err != nil {
+		t.Fatalf("the streamed backup does not open: %v", err)
+	}
+	defer restored.Close()
+	if _, ok := restored.Authenticate("alice", "password123"); !ok {
+		t.Error("the account did not survive the streamed backup")
+	}
+	if n := restored.Count(sv.ID); n != 1 {
+		t.Errorf("responses in the streamed backup = %d, want 1", n)
+	}
+	// The temporary snapshot must not be left behind in the data directory.
+	entries, err := os.ReadDir(s.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".backup-") {
+			t.Errorf("left a temporary snapshot behind: %s", e.Name())
+		}
+	}
+}
+
+func TestInitialPasswordSubcommandReadsAndThenCannot(t *testing.T) {
+	s := newStore(t)
+	const pw = "generated-at-first-start"
+	if _, err := s.AddUserMustChange("admin", RoleAdmin, pw); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.InitialPassword()
+	if err != nil {
+		t.Fatalf("InitialPassword: %v", err)
+	}
+	if got != pw {
+		t.Errorf("got %q, want the generated password", got)
+	}
+	// Once the password has been changed there is nothing to hand out, and the
+	// message should say why rather than looking like a failure.
+	if err := s.SetPassword("admin", "chosen by the operator"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.InitialPassword()
+	if err == nil {
+		t.Fatal("the initial password was still readable after being changed")
+	}
+	if !strings.Contains(err.Error(), "already been set up") {
+		t.Errorf("unhelpful message: %v", err)
+	}
+}

@@ -35,6 +35,13 @@ in it is `quicksurvey`, which forces two design choices:
 - **Seeding a test instance.** There is no shell to chain `user add && serve`,
   so the compose test profile uses a separate init container that must exit
   successfully before the server starts.
+- **Getting anything out.** `quicksurvey initial-password` prints the bootstrap
+  credential because there is no `cat`; `quicksurvey backup -to -` streams a
+  snapshot to stdout because there is no `tar` and so `kubectl cp` cannot work.
+
+The rule this keeps producing: if an operator needs to do something inside the
+container, the binary has to do it. Documentation that reaches for a shell is
+documentation of a command that cannot run.
 
 `/data` is created in the image owned by 65532, so a fresh named volume
 inherits that ownership rather than being created root-owned and unwritable.
