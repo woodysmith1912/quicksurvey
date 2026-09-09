@@ -1400,3 +1400,45 @@ func TestAccountDeleteRequiresTheUsernameTyped(t *testing.T) {
 		t.Error("the account survived a correct confirmation")
 	}
 }
+
+// Choosing someone's first password is the same power as resetting theirs: you
+// can sign in as them. Invitations are the only web path in.
+func TestAdminCannotCreateAnAccountWithAPassword(t *testing.T) {
+	h := newHarness(t)
+	pw := h.seedUser("root", store.RoleAdmin)
+	admin := h.browser()
+	admin.login("root", pw)
+
+	token := admin.csrf("/admin/users")
+	r := admin.follow(admin.post("/admin/users", url.Values{
+		"csrf": {token}, "action": {"add"}, "username": {"planted"},
+		"password": {"chosen-by-admin"}, "role": {"admin"},
+	}))
+	if _, ok := h.st.User("planted"); ok {
+		t.Fatal("an admin created an account with a password they chose")
+	}
+	if !strings.Contains(r.body, "created by invitation") {
+		t.Error("the refusal should say what to do instead")
+	}
+	// And the form is not offered.
+	body := admin.get("/admin/users").body
+	for _, id := range []string{`data-testid="add-user"`, `data-testid="new-password"`} {
+		if strings.Contains(body, id) {
+			t.Errorf("the accounts page still offers %s", id)
+		}
+	}
+	// Invitations still work, and still produce an account nobody else has a
+	// password for.
+	link := h.inviteURL(admin, store.RoleEditor)
+	guest := h.browser()
+	token = guest.csrf(link)
+	if r := guest.post(link, url.Values{
+		"csrf": {token}, "username": {"invited"},
+		"password": {"chosen-by-them"}, "confirm": {"chosen-by-them"},
+	}); r.status != http.StatusSeeOther {
+		t.Fatalf("claiming an invitation = %d", r.status)
+	}
+	if _, ok := h.st.User("invited"); !ok {
+		t.Error("invitation flow broke")
+	}
+}

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { deleteAccount, signIn, userRow } from '../helpers';
+import { deleteAccount, inviteAndClaim, signIn, userRow } from '../helpers';
 
 /** Creates an invitation as an admin and returns the one-time link. */
 async function createInvite(page: Page, role: string, note = 'come help out') {
@@ -109,11 +109,7 @@ test.describe('invitation links', () => {
   test('a non-admin is offered no way to invite anyone', async ({ page, browser }) => {
     await signIn(page);
     // Make an editor the direct way.
-    await page.goto('/admin/users');
-    await page.getByTestId('new-username').fill('ed');
-    await page.getByTestId('new-password').fill('password123');
-    await page.getByTestId('new-role').selectOption('editor');
-    await page.getByTestId('add-user').click();
+    await inviteAndClaim(page, browser, 'ed', 'password123', 'editor');
 
     const ctx = await browser.newContext();
     const editor = await ctx.newPage();

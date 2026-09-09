@@ -1,23 +1,22 @@
 import { expect, test } from '@playwright/test';
-import { createSurvey, deleteAccount, publish, signIn, userRow } from '../helpers';
+import { createSurvey, deleteAccount, inviteAndClaim, publish, signIn, userRow } from '../helpers';
 
 // These tests change instance-wide state, so each one cleans up the accounts it
 // creates. The suite runs with a single worker, in file order.
 test.describe('accounts and roles', () => {
   const pw = 'account-test-pw';
 
-  test('an admin can add a viewer and an editor', async ({ page }) => {
+  test('an admin can add a viewer and an editor, by invitation only', async ({ page, browser }) => {
     await signIn(page);
     await page.goto('/admin/users');
 
     for (const [name, role] of [['val', 'viewer'], ['eve', 'editor']] as const) {
-      await page.getByTestId('new-username').fill(name);
-      await page.getByTestId('new-password').fill(pw);
-      await page.getByTestId('new-role').selectOption(role);
-      await page.getByTestId('add-user').click();
-      await expect(page.getByTestId('flash')).toContainText('created');
+      await inviteAndClaim(page, browser, name, pw, role);
       await expect(userRow(page, name)).toBeVisible();
     }
+    // And there is no way for an admin to choose someone's first password.
+    await expect(page.getByTestId('add-user')).toHaveCount(0);
+    await expect(page.getByTestId('new-password')).toHaveCount(0);
   });
 
   test('a viewer reads results and exports but cannot edit', async ({ page, browser }) => {
@@ -108,11 +107,7 @@ test.describe('accounts and roles', () => {
 
   test('an admin hands out a reset link and never sees the password', async ({ page, browser }) => {
     await signIn(page);
-    await page.goto('/admin/users');
-    await page.getByTestId('new-username').fill('resetme');
-    await page.getByTestId('new-password').fill('password123');
-    await page.getByTestId('new-role').selectOption('viewer');
-    await page.getByTestId('add-user').click();
+    await inviteAndClaim(page, browser, 'resetme', 'password123', 'viewer');
 
     // The admin can only generate a link — there is no field to type someone
     // else's password into.
