@@ -27,6 +27,15 @@ type Config struct {
 	// SecureCookies marks cookies Secure. Leave true unless serving plain
 	// HTTP on a trusted network, where the browser would otherwise drop them.
 	SecureCookies bool
+	// LoginRate and VoterRate are the per-address ceilings, in events per
+	// minute. Zero disables that limiter entirely, which is there for load
+	// testing: a benchmark run from one address is indistinguishable from an
+	// attack, and measuring the limiter instead of the application is not the
+	// point of a load test.
+	//
+	// Zero is not a setting to leave on. Start-up says so loudly.
+	LoginRate int
+	VoterRate int
 	// TrustProxy takes the client address from X-Real-Ip / X-Forwarded-For.
 	//
 	// It governs rate limiting, so it matters which way it is wrong. Behind a
@@ -68,13 +77,26 @@ func New(st *store.Store, cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	// Zero means "no limit", so it has to be asked for rather than arrived at
+	// by leaving a field unset.
+	if cfg.LoginRate == 0 {
+		cfg.LoginRate = DefaultLoginRate
+	}
+	if cfg.VoterRate == 0 {
+		cfg.VoterRate = DefaultVoterRate
+	}
+	if cfg.LoginRate < 0 || cfg.VoterRate < 0 {
+		cfg.Logger.Warn("RATE LIMITING IS OFF",
+			"login_per_minute", cfg.LoginRate, "voter_per_minute", cfg.VoterRate,
+			"note", "intended for load testing only; sign-in is unmetered and voter identities are free")
+	}
 	s := &Server{
 		cfg:   cfg,
 		store: st,
 		// A sign-in attempt costs 600,000 PBKDF2 iterations whether or not
 		// the password is right. Nobody legitimately fails ten times a
 		// minute, so this can be tight.
-		loginLimit: newLimiter(10, time.Minute),
+		loginLimit: newLimiter(cfg.LoginRate, time.Minute),
 		// Issuing a *new* voter identity is the thing worth limiting, not
 		// voting. Limiting every write by address punishes the case this
 		// application is for — a survey link shared inside one office, where
@@ -84,7 +106,7 @@ func New(st *store.Store, cfg Config) (*Server, error) {
 		// Limiting issuance instead bounds fake identities directly, and
 		// costs a legitimate crowd nothing: they are issued one cookie each
 		// and then vote and re-vote freely.
-		voterLimit: newLimiter(300, time.Minute),
+		voterLimit: newLimiter(cfg.VoterRate, time.Minute),
 	}
 	if err := s.parseTemplates(); err != nil {
 		return nil, err
@@ -92,6 +114,14 @@ func New(st *store.Store, cfg Config) (*Server, error) {
 	s.routes()
 	return s, nil
 }
+
+// Default per-address ceilings, in events per minute. A negative value disables
+// a limiter; zero means "unset", so that forgetting to configure one cannot
+// silently turn it off.
+const (
+	DefaultLoginRate = 10
+	DefaultVoterRate = 300
+)
 
 // MaxBody bounds a request body. Every form here is a few hundred bytes; the
 // cap exists so an anonymous caller cannot choose how much memory a POST costs.

@@ -92,6 +92,16 @@ func env(key, def string) string {
 	return def
 }
 
+// envInt reads an integer setting, falling back when unset or unparseable.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
 func envBool(key string, def bool) bool {
 	if v := os.Getenv(key); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
@@ -120,6 +130,10 @@ func serve(args []string) error {
 		"mark cookies Secure; set false only when serving plain HTTP ($QS_SECURE_COOKIES)")
 	redirect := fs.Bool("redirect-https", envBool("QS_REDIRECT_HTTPS", false),
 		"redirect plain-HTTP requests to https, using X-Forwarded-Proto ($QS_REDIRECT_HTTPS)")
+	loginRate := fs.Int("login-rate", envInt("QS_LOGIN_RATE", web.DefaultLoginRate),
+		"failed sign-ins allowed per minute per address; -1 disables ($QS_LOGIN_RATE)")
+	voterRate := fs.Int("voter-rate", envInt("QS_VOTER_RATE", web.DefaultVoterRate),
+		"new voter identities allowed per minute per address; -1 disables ($QS_VOTER_RATE)")
 	trustProxy := fs.Bool("trust-proxy", envBool("QS_TRUST_PROXY", true),
 		"take the client address for rate limiting from X-Real-Ip/X-Forwarded-For; "+
 			"set false only when serving the internet directly ($QS_TRUST_PROXY)")
@@ -143,7 +157,8 @@ func serve(args []string) error {
 
 	srv, err := web.New(st, web.Config{
 		BaseURL: *baseURL, SecureCookies: *secure, RedirectHTTPS: *redirect,
-		TrustProxy: *trustProxy, Location: loc, Logger: log,
+		TrustProxy: *trustProxy, LoginRate: *loginRate, VoterRate: *voterRate,
+		Location: loc, Logger: log,
 	})
 	if err != nil {
 		return err
@@ -168,7 +183,8 @@ func serve(args []string) error {
 	}()
 
 	log.Info("listening", "addr", *addr, "data", *dir, "tz", loc.String(),
-		"secure_cookies", *secure, "redirect_https", *redirect, "trust_proxy", *trustProxy)
+		"secure_cookies", *secure, "redirect_https", *redirect, "trust_proxy", *trustProxy,
+		"login_rate", *loginRate, "voter_rate", *voterRate)
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

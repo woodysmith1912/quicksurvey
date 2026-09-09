@@ -273,6 +273,19 @@ The CLI can still set a password directly. That needs a shell inside the
 container, which is a different threat model, and it is the break-glass path
 when nobody can sign in at all.
 
+### Turning the limits off
+
+`-login-rate=-1` and `-voter-rate=-1` disable them. That exists for load
+testing: a benchmark run from one address is indistinguishable from an attack,
+and measuring the limiter rather than the application is not the point of the
+exercise.
+
+Zero means "unset" and falls back to the default, so forgetting to configure a
+limit cannot silently remove it — disabling has to be asked for with a negative
+number. A disabled limiter is a nil pointer whose methods are nil-safe, so there
+is no way to half-disable one, and start-up logs `RATE LIMITING IS OFF` at WARN
+so a run left that way is visible in the first line of its log.
+
 ## Roles
 
 | Role | Can |

@@ -45,7 +45,14 @@ const (
 )
 
 // newLimiter allows n events per window per client, with a burst of n.
+//
+// n <= 0 returns nil, meaning no limit at all. Every method is nil-safe, so a
+// disabled limiter costs a pointer comparison rather than a branch at each call
+// site — and, more importantly, there is no way to half-disable one.
 func newLimiter(n int, window time.Duration) *limiter {
+	if n <= 0 {
+		return nil
+	}
 	return &limiter{
 		every:   rate.Every(window / time.Duration(n)),
 		burst:   n,
@@ -63,6 +70,9 @@ func newLimiter(n int, window time.Duration) *limiter {
 // several people sign in from one address, while an attacker — who produces
 // nothing but failures — is billed either way.
 func (l *limiter) ok(key string) bool {
+	if l == nil {
+		return true
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	b, exists := l.buckets[key]
@@ -74,10 +84,18 @@ func (l *limiter) ok(key string) bool {
 }
 
 // spend charges one event against this client, creating the bucket if needed.
-func (l *limiter) spend(key string) { l.allow(key) }
+func (l *limiter) spend(key string) {
+	if l == nil {
+		return
+	}
+	l.allow(key)
+}
 
 // allow reports whether this client may proceed now, and charges for it.
 func (l *limiter) allow(key string) bool {
+	if l == nil {
+		return true
+	}
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()

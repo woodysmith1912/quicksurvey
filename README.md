@@ -52,6 +52,8 @@ uses.
 | `-base-url` | `QS_BASE_URL` | derived | External origin, e.g. `https://survey.example.com`. Used for the shareable link shown to editors. Derived from `Host` / `X-Forwarded-*` if unset. |
 | `-tz` | `QS_TZ` | `Local` | Timezone for displaying and entering times, e.g. `America/New_York`. |
 | `-secure-cookies` | `QS_SECURE_COOKIES` | `true` | Mark cookies `Secure`. Set false only for plain HTTP. |
+| `-login-rate` | `QS_LOGIN_RATE` | `10` | Failed sign-ins per minute per address. **`-1` disables**, for load testing. Only failures count, so signing in successfully never consumes it. |
+| `-voter-rate` | `QS_VOTER_RATE` | `300` | New voter identities per minute per address. **`-1` disables.** Voting itself is never limited; being issued a new identity is, since that is the abusable step. |
 | `-redirect-https` | `QS_REDIRECT_HTTPS` | `false` | Redirect plain HTTP to https, from `X-Forwarded-Proto`. Turn on when the proxy serves `:80` without redirecting itself — `Secure` cookies are not sent over `http://`, so visitors arriving there cannot sign in or vote. `/healthz` is exempt so probes still work. |
 
 ## The container
