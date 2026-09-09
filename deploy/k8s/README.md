@@ -28,10 +28,11 @@ Which tag it publishes depends on what you pushed:
 | You push | CI publishes |
 |---|---|
 | a commit to `main` | `main`, `sha-<full-sha>` |
-| a tag `v0.1.0` | `v0.1.0`, `0.1`, `latest`, `sha-<full-sha>` |
+| a tag `v0.1.0` | `0.1.0`, `0.1`, `v0.1.0`, `latest`, `sha-<full-sha>` |
 
-The manifests pin `v0.1.0`, which exists only once you have pushed that git
-tag:
+The manifests pin `0.1.0` — OCI tags conventionally drop the leading `v`, so
+the git tag `v0.1.0` publishes the image `0.1.0`. It exists once you have
+pushed that git tag:
 
 ```sh
 git tag v0.1.0 && git push origin v0.1.0

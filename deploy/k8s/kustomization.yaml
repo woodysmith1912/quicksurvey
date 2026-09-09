@@ -24,6 +24,10 @@ labels:
 
 # Set the image once, here, rather than editing the StatefulSet. Prefer a digest
 # over a tag for anything you want to be able to roll back to with certainty.
+#
+# Note the tag has no "v": OCI tags conventionally drop it, so the git tag
+# v0.1.0 publishes the image 0.1.0. CI also publishes the tag verbatim, so
+# either form works, but the unprefixed one is the convention.
 images:
   - name: ghcr.io/woodysmith1912/quicksurvey
-    newTag: v0.1.0
+    newTag: "0.1.0"
