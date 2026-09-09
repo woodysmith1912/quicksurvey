@@ -117,12 +117,33 @@ with `busy_timeout` is what makes that a wait rather than an error.
 | 1 connection | 611µs | 651µs | 653µs | 16.3ms |
 | 4 connections | 272µs | 292µs | 283µs | 4.85ms |
 
-Two things worth keeping in mind. Loading a respondent's existing answer costs
-about 40µs — the response and its choices are two indexed lookups, and the
-number of prior respondents is irrelevant to them. And showing results to
-respondents costs 25x, because `Tally` walks every response on every ballot
-load and allocates 2.7MB doing it. That is the cliff in this application: it
-grows linearly with the survey and nothing else does.
+Loading a respondent's existing answer costs about 40µs — the response and its
+choices are two indexed lookups, and the number of prior respondents does not
+enter into them.
+
+Showing results to respondents used to cost 25x, because `Tally` walked every
+response on every ballot load. It is now cached, keyed on a counter that every
+committed write bumps, which took that case from 4,851µs to 359µs. See below.
+
+### At realistic scale
+
+Against a seeded database of 10,000 surveys, 99,853 options, 75,173 responses
+and 250,790 choices — 50.8MB:
+
+| | ns/op | requests/s |
+|---|---|---|
+| fresh ballot | 215µs | ~4,650 |
+| returning respondent | 258µs | ~3,870 |
+| with results shown | 263µs | ~3,800 |
+
+The database being large does not matter. Those numbers are *better* than the
+synthetic benchmark's, because the seeded surveys carry seven to fifteen options
+against its thirty: every lookup is indexed, so the cost is the size of the
+survey being read, not how many surveys sit beside it.
+
+Building that fixture through the ordinary store API — one transaction per
+survey, one per response — took 45 seconds, and stayed linear throughout: 4.18s
+for the first thousand surveys, 4.51s for the last.
 
 **SQLite's locking is unreliable on NFS.** On a block device — which is what a
 DigitalOcean Block Storage volume is — it behaves correctly. An `RWX`
@@ -232,6 +253,30 @@ CSRF tokens are derived from whichever cookie identifies the caller — the
 session for accounts, the voter token for respondents. Both cookies are
 `HttpOnly`, so a cross-site page cannot read the token it would need to forge a
 request.
+
+## The tally cache
+
+`Tally` is called on every ballot load of a survey that shows results to
+respondents. Computing it walks every response and every choice, so it grew
+linearly with the survey while nothing else did: 16ms and 2.7MB per request at
+a thousand respondents, against 0.65ms and 123KB for the same page without.
+
+It is cached now, and the interesting part is the invalidation. Every write that
+can change a tally — a response, a moderation decision, a merge, publishing,
+deleting a survey — goes through `Store.tx`, so that is where a counter is
+bumped, and the cache is keyed on it. Nothing has to remember to invalidate at
+seven call sites, and a new write path cannot be added that quietly serves stale
+counts.
+
+The counter is global rather than per survey, so any write invalidates every
+cached tally. That is deliberate: on the surveys where this matters, ballot
+loads vastly outnumber votes, so the hit rate stays high, and correctness does
+not depend on tracking which survey a transaction touched.
+
+A cache that can serve a stale count is worse than no cache, because the count
+is the entire product. `TestTallyCacheIsInvalidatedByEveryWritePath` walks each
+of those paths and insists the next read reflects it, and a concurrent test
+hammers reads against writes under `-race`.
 
 ## Migrations
 

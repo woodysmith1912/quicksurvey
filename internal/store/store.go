@@ -28,6 +28,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // pure Go, so CGO_ENABLED=0 and a static image still work
@@ -44,6 +46,22 @@ type Store struct {
 	dir    string
 	db     *sql.DB
 	secret []byte
+
+	// gen counts committed write transactions. Every write that can change a
+	// tally goes through tx, so bumping it there makes cache invalidation
+	// something the code cannot forget rather than something it must remember
+	// at each of seven call sites.
+	gen atomic.Uint64
+
+	tallyMu    sync.Mutex
+	tallyGen   uint64
+	tallyCache map[string]cachedTally
+}
+
+// cachedTally is one survey's counted result, valid for a particular gen.
+type cachedTally struct {
+	results     []Result
+	respondents int
 }
 
 const dbFile = "quicksurvey.db"
@@ -328,7 +346,16 @@ func (s *Store) tx(fn func(*sql.Tx) error) error {
 	if err := fn(tx); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Any committed write may have changed a tally: a response, a moderation
+	// decision, a merge, a whole survey. Rather than reason about which, treat
+	// every commit as invalidating. Writes are rare next to ballot loads on the
+	// surveys where this matters, so the hit rate stays high, and there is no
+	// way to add a write path that quietly serves stale counts.
+	s.gen.Add(1)
+	return nil
 }
 
 // --- time helpers ---------------------------------------------------------

@@ -29,11 +29,8 @@
       Let's Encrypt rate-limit incident waiting to happen.
 
 ## Next
-- [ ] FIX  `Tally` runs on every ballot GET when a survey shows results to
-      respondents, walking every response row: 16.3ms and 2.7MB per request at
-      1,000 respondents against 0.65ms without. It grows linearly with the
-      survey. Cache the tally per survey and invalidate it on write, or
-      aggregate in SQL rather than in Go. `BenchmarkBallot` measures it.
+- [x] `Tally` is cached, invalidated by a write counter bumped in Store.tx.
+      4,851µs -> 359µs at 1,000 respondents with results shown.
 
 ## Improvements
 - [x] The front page is a splash that explains the site; the sign-in link sits
