@@ -53,6 +53,10 @@ services:
       # The container speaks plain HTTP. Leave this false only while reaching
       # the port directly; set it true once a proxy terminates TLS.
       QS_SECURE_COOKIES: "false"
+      # Reached directly on a published port here, so the client address is the
+      # real one and forwarded headers must not be believed. Set this true once
+      # a proxy is in front, or rate limiting puts everyone in one bucket.
+      QS_TRUST_PROXY: "false"
       # QS_BASE_URL: https://survey.example.com
 
   # ---- browser tests ---------------------------------------------------

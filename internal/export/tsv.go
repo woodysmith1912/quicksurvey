@@ -15,8 +15,8 @@ import (
 	"github.com/woodysmith1912/quicksurvey/internal/store"
 )
 
-// cell makes a value safe to place between tabs. Tabs and newlines inside
-// free text would otherwise shift every following column.
+// cell makes a value safe to place between tabs. Tabs and newlines inside free
+// text would otherwise shift every following column.
 func cell(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch r {
@@ -28,6 +28,29 @@ func cell(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// textCell is cell for a value someone else wrote — an option's text or a
+// respondent's comment.
+//
+// Spreadsheets treat a cell beginning with =, +, - or @ as a formula, so text
+// this file carries verbatim becomes executable on import: =HYPERLINK and
+// =IMPORTDATA can exfiltrate the rest of the sheet, and Excel additionally
+// honours =cmd| for DDE. Since the entire point of this export is that you drop
+// it straight into Google Sheets, a comment must not be able to run there.
+//
+// The leading apostrophe is OWASP's recommendation. Sheets treats it as the
+// "this is text" marker and does not display it.
+func textCell(s string) string {
+	s = cell(s)
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@':
+		return "'" + s
+	}
+	return s
 }
 
 func row(w io.Writer, fields ...string) error {
@@ -49,9 +72,9 @@ func row(w io.Writer, fields ...string) error {
 // can tell an unselected option from a withdrawn one.
 func header(o store.Option) string {
 	if o.Status == store.OptApproved {
-		return o.Text
+		return textCell(o.Text)
 	}
-	return fmt.Sprintf("%s [%s]", o.Text, o.Status)
+	return textCell(fmt.Sprintf("%s [%s]", o.Text, o.Status))
 }
 
 // Responses writes the wide, one-row-per-response table: a column per option
@@ -88,7 +111,7 @@ func Responses(w io.Writer, sv *store.Survey, responses []*store.Response, loc *
 				rec = append(rec, "0")
 			}
 		}
-		rec = append(rec, fmt.Sprint(n), r.Comment)
+		rec = append(rec, fmt.Sprint(n), textCell(r.Comment))
 		if err := row(bw, rec...); err != nil {
 			return err
 		}
@@ -105,7 +128,7 @@ func Summary(w io.Writer, sv *store.Survey, results []store.Result, respondents 
 		return err
 	}
 	for _, res := range results {
-		if err := row(bw, res.Option.Text, fmt.Sprint(res.Votes), fmt.Sprint(respondents),
+		if err := row(bw, textCell(res.Option.Text), fmt.Sprint(res.Votes), fmt.Sprint(respondents),
 			fmt.Sprintf("%.1f", res.Percent)); err != nil {
 			return err
 		}

@@ -38,6 +38,8 @@ func (s *Server) handleInviteClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	iv, ok := s.store.InviteByToken(token)
 	if !ok {
+		// A wrong token is a guess at an invitation; bill it.
+		s.loginLimit.spend(clientKey(r, s.cfg.TrustProxy))
 		s.fail(w, r, http.StatusNotFound, errors.New("that invitation link is no longer valid"))
 		return
 	}

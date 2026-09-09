@@ -16,6 +16,10 @@ import (
 // random browser cookie (see Store.VoterID), which is what makes repeat
 // submissions detectable without making respondents identifiable.
 //
+// That is a claim about this record, not about the deployment. The proxy in
+// front logs an IP and a time, and Created/Updated here are timestamps; anyone
+// holding both can line them up. See the anonymity section of DESIGN.md.
+//
 // There is one row per respondent per survey. A second submission replaces the
 // first rather than adding to it, which is what stops anyone inflating a count
 // by resubmitting. Superseded answers are not retained.
@@ -184,7 +188,14 @@ func loadResponse(q queryer, surveyID, voter string) (*Response, error) {
 	return &r, rows.Err()
 }
 
-const maxWriteInsPerVoter = 5
+const (
+	maxWriteInsPerVoter = 5
+	// A separate, per-survey ceiling on unmoderated suggestions. Without it a
+	// single person could fill a survey's whole 500-option budget with pending
+	// write-ins, after which editors cannot add options and nobody else can
+	// suggest one.
+	maxPendingPerSurvey = 50
+)
 
 // AddWriteIn records a proposed option and the submitter's vote for it in one
 // transaction. The option is pending, so it neither appears on anyone else's
@@ -222,6 +233,10 @@ func (s *Store) addWriteIn(surveyID, voter, text string, preview bool) (string, 
 		}
 		if n := countPending(sv, prev); n >= maxWriteInsPerVoter {
 			return fmt.Errorf("you already have %d suggestions awaiting review", n)
+		}
+		if n := len(sv.PendingOptions()); n >= maxPendingPerSurvey {
+			return fmt.Errorf("this survey already has %d suggestions awaiting review; "+
+				"try again once a moderator has worked through them", n)
 		}
 
 		if newOpt, err = AddOption(sv, text, OptPending, "writein"); err != nil {

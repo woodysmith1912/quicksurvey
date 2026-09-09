@@ -31,7 +31,10 @@ func (s *Server) visibleSurvey(w http.ResponseWriter, r *http.Request) (*store.S
 		return nil, false, false
 	}
 	if sv.State == store.StateDraft {
-		u := s.sessionUser(r)
+		// activeUser, not sessionUser: an unapproved invitee holds a valid
+		// session and would otherwise get the draft they were bounced from
+		// /admin/ for.
+		u := s.activeUser(r)
 		if u == nil || !u.Role.AtLeast(store.RoleEditor) {
 			s.fail(w, r, http.StatusNotFound, errors.New("no such survey"))
 			return nil, false, false
@@ -47,6 +50,10 @@ func (s *Server) handleBallot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := s.voterToken(w, r)
+	if token == "" {
+		s.tooMany(w, r, "Too many new visitors from your address at once. Wait a minute and reload.")
+		return
+	}
 	voter := s.store.VoterID(sv.ID, token)
 
 	d := ballotData{Survey: sv, Selected: map[string]bool{},
@@ -81,7 +88,12 @@ func (s *Server) handleVote(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusForbidden, errors.New("your session expired; please reload and try again"))
 		return
 	}
-	voter := s.store.VoterID(sv.ID, s.voterToken(w, r))
+	token := s.voterToken(w, r)
+	if token == "" {
+		s.tooMany(w, r, "Too many new visitors from your address at once. Wait a minute and try again.")
+		return
+	}
+	voter := s.store.VoterID(sv.ID, token)
 	save := s.store.SaveResponse
 	if preview {
 		save = s.store.PreviewResponse
@@ -109,7 +121,12 @@ func (s *Server) handleWriteIn(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusForbidden, errors.New("your session expired; please reload and try again"))
 		return
 	}
-	voter := s.store.VoterID(sv.ID, s.voterToken(w, r))
+	token := s.voterToken(w, r)
+	if token == "" {
+		s.tooMany(w, r, "Too many new visitors from your address at once. Wait a minute and try again.")
+		return
+	}
+	voter := s.store.VoterID(sv.ID, token)
 	add := s.store.AddWriteIn
 	if preview {
 		add = s.store.PreviewWriteIn

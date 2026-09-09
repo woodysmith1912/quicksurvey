@@ -88,6 +88,12 @@ spec:
             # there could not sign in or vote and would get no explanation.
             - name: QS_REDIRECT_HTTPS
               value: "true"
+            # Rate limiting keys on the client address, which behind Traefik
+            # only arrives in X-Forwarded-For / X-Real-Ip. With this off every
+            # visitor would share one bucket and the limit would fall on
+            # everyone at once.
+            - name: QS_TRUST_PROXY
+              value: "true"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

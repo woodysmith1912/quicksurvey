@@ -116,6 +116,9 @@ func serve(args []string) error {
 		"mark cookies Secure; set false only when serving plain HTTP ($QS_SECURE_COOKIES)")
 	redirect := fs.Bool("redirect-https", envBool("QS_REDIRECT_HTTPS", false),
 		"redirect plain-HTTP requests to https, using X-Forwarded-Proto ($QS_REDIRECT_HTTPS)")
+	trustProxy := fs.Bool("trust-proxy", envBool("QS_TRUST_PROXY", true),
+		"take the client address for rate limiting from X-Real-Ip/X-Forwarded-For; "+
+			"set false only when serving the internet directly ($QS_TRUST_PROXY)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -136,7 +139,7 @@ func serve(args []string) error {
 
 	srv, err := web.New(st, web.Config{
 		BaseURL: *baseURL, SecureCookies: *secure, RedirectHTTPS: *redirect,
-		Location: loc, Logger: log,
+		TrustProxy: *trustProxy, Location: loc, Logger: log,
 	})
 	if err != nil {
 		return err
@@ -161,7 +164,7 @@ func serve(args []string) error {
 	}()
 
 	log.Info("listening", "addr", *addr, "data", *dir, "tz", loc.String(),
-		"secure_cookies", *secure, "redirect_https", *redirect)
+		"secure_cookies", *secure, "redirect_https", *redirect, "trust_proxy", *trustProxy)
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

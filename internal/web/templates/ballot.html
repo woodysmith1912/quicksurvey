@@ -30,7 +30,9 @@
     </ul>
 
     {{if $d.Survey.AllowComment}}
-    <label for="comment">Anything else you want to add? (optional)</label>
+    <!-- Not "anything to add": this sits directly above a form for adding
+         options, and the two readings of "add" are easy to confuse. -->
+    <label for="comment">Comments? (optional)</label>
     <textarea id="comment" name="comment" maxlength="2000" data-testid="comment">{{$d.Comment}}</textarea>
     {{end}}
 

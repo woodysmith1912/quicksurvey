@@ -27,6 +27,15 @@ type Config struct {
 	// SecureCookies marks cookies Secure. Leave true unless serving plain
 	// HTTP on a trusted network, where the browser would otherwise drop them.
 	SecureCookies bool
+	// TrustProxy takes the client address from X-Real-Ip / X-Forwarded-For.
+	//
+	// It governs rate limiting, so it matters which way it is wrong. Behind a
+	// proxy with it off, every request shares one bucket and the limit falls
+	// on everybody at once. Exposed directly with it on, a caller sets the
+	// header themselves and gets a fresh bucket per request — a limit that
+	// looks like it works and does not. Every documented deployment here is
+	// behind a proxy, so it defaults on.
+	TrustProxy bool
 	// RedirectHTTPS sends plain-HTTP requests to the https:// equivalent,
 	// based on X-Forwarded-Proto. Needed when the proxy in front serves both
 	// :80 and :443 without redirecting itself: Secure cookies are not sent
@@ -44,6 +53,10 @@ type Server struct {
 	store *store.Store
 	tmpl  map[string]*template.Template
 	mux   *http.ServeMux
+
+	// Two limiters, for two different scarce things.
+	loginLimit *limiter
+	voterLimit *limiter
 }
 
 // New builds a Server. It fails if the embedded templates do not parse, which
@@ -55,7 +68,24 @@ func New(st *store.Store, cfg Config) (*Server, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	s := &Server{cfg: cfg, store: st}
+	s := &Server{
+		cfg:   cfg,
+		store: st,
+		// A sign-in attempt costs 600,000 PBKDF2 iterations whether or not
+		// the password is right. Nobody legitimately fails ten times a
+		// minute, so this can be tight.
+		loginLimit: newLimiter(10, time.Minute),
+		// Issuing a *new* voter identity is the thing worth limiting, not
+		// voting. Limiting every write by address punishes the case this
+		// application is for — a survey link shared inside one office, where
+		// everyone shares a NAT address — while barely inconveniencing an
+		// attacker, who only needs one identity per fake vote anyway.
+		//
+		// Limiting issuance instead bounds fake identities directly, and
+		// costs a legitimate crowd nothing: they are issued one cookie each
+		// and then vote and re-vote freely.
+		voterLimit: newLimiter(300, time.Minute),
+	}
 	if err := s.parseTemplates(); err != nil {
 		return nil, err
 	}
@@ -63,7 +93,14 @@ func New(st *store.Store, cfg Config) (*Server, error) {
 	return s, nil
 }
 
+// MaxBody bounds a request body. Every form here is a few hundred bytes; the
+// cap exists so an anonymous caller cannot choose how much memory a POST costs.
+const MaxBody = 64 << 10
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		r.Body = http.MaxBytesReader(w, r.Body, MaxBody)
+	}
 	if s.cfg.RedirectHTTPS && !s.isHTTPS(r) {
 		// 308 rather than 302: the method and body must survive, or a POSTed
 		// vote would silently become a GET.
@@ -76,6 +113,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 	s.mux.ServeHTTP(w, r)
+}
+
+// limitLogin refuses a caller who has already spent their budget of failures.
+// The handler charges only when the attempt fails, so someone signing in
+// successfully never consumes it.
+func (s *Server) limitLogin(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.loginLimit.ok(clientKey(r, s.cfg.TrustProxy)) {
+			s.cfg.Logger.Warn("rate limited", "path", r.URL.Path)
+			s.tooMany(w, r, "Too many failed attempts from your address. Wait a minute and try again.")
+			return
+		}
+		h(w, r)
+	}
 }
 
 // isHTTPS reports whether the request reached the proxy over TLS. The health
@@ -108,10 +159,10 @@ func (s *Server) routes() {
 
 	// Claiming an invitation is public: the token in the URL is the credential.
 	m.HandleFunc("GET /invite/{token}", s.handleInviteForm)
-	m.HandleFunc("POST /invite/{token}", s.handleInviteClaim)
+	m.HandleFunc("POST /invite/{token}", s.limitLogin(s.handleInviteClaim))
 
 	m.HandleFunc("GET /login", s.handleLoginForm)
-	m.HandleFunc("POST /login", s.handleLogin)
+	m.HandleFunc("POST /login", s.limitLogin(s.handleLogin))
 	m.HandleFunc("POST /logout", s.handleLogout)
 	m.Handle("GET /account/pending", s.requireRole(store.RoleViewer, s.handlePending))
 	m.Handle("GET /account/password", s.requireRole(store.RoleViewer, s.handlePasswordForm))
@@ -209,7 +260,7 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, name
 		s.fail(w, r, http.StatusInternalServerError, fmt.Errorf("no such template %q", name))
 		return
 	}
-	p := page{Title: title, User: userFrom(r.Context()), CSRF: s.csrfToken(r), Flash: takeFlash(w, r), Data: data}
+	p := page{Title: title, User: userFrom(r.Context()), CSRF: s.csrfToken(r), Flash: s.takeFlash(w, r), Data: data}
 
 	// Render to memory first: a template error halfway through a streamed
 	// response would leave the client with a broken page and a 200.

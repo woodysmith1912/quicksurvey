@@ -401,6 +401,9 @@ func SetOptionText(sv *Survey, id, text string) error {
 	if text == "" {
 		return fmt.Errorf("option text must not be empty")
 	}
+	if len(text) > MaxOptionText {
+		return fmt.Errorf("option text must be %d characters or fewer", MaxOptionText)
+	}
 	for i := range sv.Options {
 		if sv.Options[i].ID == id {
 			sv.Options[i].Text = text
@@ -452,6 +455,14 @@ func AddOption(sv *Survey, text, status, source string) (string, error) {
 	if text == "" {
 		return "", fmt.Errorf("option text must not be empty")
 	}
+	// The form says maxlength=200, but that is a suggestion to a browser. An
+	// anonymous write-in reaches this function straight from a POST body, and
+	// without a cap here one request can store a megabyte that is then
+	// reloaded on every subsequent request to the survey and emitted as a
+	// column header in the export.
+	if len(text) > MaxOptionText {
+		return "", fmt.Errorf("option text must be %d characters or fewer", MaxOptionText)
+	}
 	if len(sv.Options) >= maxOptions {
 		return "", fmt.Errorf("survey already has the maximum of %d options", maxOptions)
 	}
@@ -461,3 +472,6 @@ func AddOption(sv *Survey, text, status, source string) (string, error) {
 }
 
 const maxOptions = 500
+
+// MaxOptionText bounds any option's text, wherever it came from.
+const MaxOptionText = 200

@@ -1,12 +1,25 @@
 # QuickSurvey — development TODO
 
+<!-- Marking work for me: put FIX at the start of a line, anywhere in this file.
+
+     - [ ] FIX  something that should be done next
+     FIX: this paragraph explains what is wanted
+
+     I grep for `^\s*(- \[ \] )?FIX\b` before starting, do those, and remove the
+     marker as each one lands. Anything without it I leave alone unless asked.
+     Findings live in SECURITY-REVIEW.md, which is deliberately not committed;
+     the same marker works there. -->
+
 ## Next
-- [ ] Push to GitHub. CI publishes the image automatically; then make the GHCR
-      package public, because this cluster has no registry pull secrets.
-- [ ] Tag `v0.1.0` and push the tag — the manifests pin that version, and a
-      push to `main` alone only publishes `main` and `sha-` tags.
-- [ ] Point `quicksurveys.plainwrapworks.com` at `<LB-IP>` before applying, or
-      Traefik's TLS-ALPN challenge cannot resolve the host.
+- [x] Deployed to DOKS at https://quicksurveys.plainwrapworks.com — real
+      Let's Encrypt certificate, StatefulSet on a Retain volume, one replica.
+- [x] Pushed to GitHub; CI publishes the image. The GHCR package inherits the
+      repository's visibility, so it was already public — verified by pulling
+      it anonymously.
+- [x] Tagged v0.1.0. Note OCI tags drop the leading "v", so the manifests
+      reference `0.1.0`.
+- [x] DNS delegated to DigitalOcean and propagated; wildcard plus an explicit
+      record, and mail records saying the domain sends and receives nothing.
 - [ ] Traefik in this cluster stores `acme.json` inside its container with no
       volume, so it re-requests every certificate on restart. Not ours, but a
       Let's Encrypt rate-limit incident waiting to happen.
@@ -60,7 +73,8 @@
 
 ## Not yet run
 - [ ] `make e2e` (the host-installed variant) — the container path is the one
-      that has actually been exercised.
+      that has actually been exercised. CI runs the host path on every push,
+      so this is now covered there rather than locally.
 
 ## Resolved during the build
 - `docker compose up` failed on the development host with
@@ -78,8 +92,15 @@
   renders), with a regression test.
 
 ## Known gaps, deliberate
-- No rate limit on `POST /login` or on write-ins beyond 5 pending per voter.
-  The README says the reverse proxy should provide one.
+- Rate limiting is per-address and in-process, so it bounds abuse rather than
+  preventing it. Sign-in bills only failures; voter identities are metered at
+  issuance rather than at every vote, because a survey link shared inside one
+  office puts a whole crowd behind one address.
+- A determined person can still inflate a count by asking for new voter
+  identities. The cookie deters accidents, not attackers, and the splash page,
+  README and DESIGN.md now say so rather than implying otherwise.
+- The operator can de-anonymise by joining the proxy's access log to response
+  timestamps. Documented rather than papered over.
 - One writer by design. SQLite makes a second process safe rather than
   corrupting, but nothing above the storage layer wants one — run one replica.
 - The project no longer has zero dependencies. `modernc.org/sqlite` brings
