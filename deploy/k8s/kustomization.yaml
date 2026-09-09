@@ -30,4 +30,4 @@ labels:
 # either form works, but the unprefixed one is the convention.
 images:
   - name: ghcr.io/woodysmith1912/quicksurvey
-    newTag: "0.2.0"
+    newTag: "0.2.1"

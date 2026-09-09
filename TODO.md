@@ -86,6 +86,9 @@
 ## Later
 - [ ] Configure outbound email, likely using Brevo free tier. The application has no need to send email, but the invitation and moderation flows
       would be more convenient if it did.
+- [ ] Purge outdated images from the registry. The CI workflow does not yet do this, and the GHCR free tier has a 10GB limit.
+- [ ] Improve backups from snapshots to dump/restic to S3
+- [ ] add observability
 
 ## Resolved during the build
 - `docker compose up` failed on the development host with
