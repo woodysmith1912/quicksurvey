@@ -79,6 +79,9 @@
 - [ ] `make e2e` (the host-installed variant) — the container path is the one
       that has actually been exercised. CI runs the host path on every push,
       so this is now covered there rather than locally.
+## Later
+- [ ] Configure outbound email, likely using Brevo free tier. The application has no need to send email, but the invitation and moderation flows
+      would be more convenient if it did.
 
 ## Resolved during the build
 - `docker compose up` failed on the development host with
