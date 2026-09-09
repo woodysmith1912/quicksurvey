@@ -57,6 +57,11 @@ services:
       # real one and forwarded headers must not be believed. Set this true once
       # a proxy is in front, or rate limiting puts everyone in one bucket.
       QS_TRUST_PROXY: "false"
+      # Rate limits, per address per minute. Set either to -1 to disable, which
+      # is what a load test wants: a benchmark from one address looks exactly
+      # like an attack, and measuring the limiter is not the point.
+      # QS_LOGIN_RATE: "-1"
+      # QS_VOTER_RATE: "-1"
       # QS_BASE_URL: https://survey.example.com
 
   # ---- browser tests ---------------------------------------------------

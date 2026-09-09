@@ -2,10 +2,13 @@ package web
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/woodysmith1912/quicksurvey/internal/store"
 )
 
 func TestLimiterAllowsBurstThenRefuses(t *testing.T) {
@@ -94,5 +97,53 @@ func TestIPv6ClientsAreGroupedBySubnet(t *testing.T) {
 	// IPv4 is exact, including when written as v4-in-v6.
 	if got := canonicalIP("::ffff:203.0.113.7"); got != "203.0.113.7" {
 		t.Errorf("v4-in-v6 = %q, want 203.0.113.7", got)
+	}
+}
+
+// A load test from one address is indistinguishable from an attack, so there
+// has to be a way to take the limiter out of the measurement.
+func TestLimitersCanBeDisabled(t *testing.T) {
+	var l *limiter = newLimiter(-1, time.Minute)
+	if l != nil {
+		t.Fatal("a negative rate should produce no limiter at all")
+	}
+	// Every method has to be nil-safe, or disabling one panics at the first
+	// request rather than at start-up.
+	for i := range 10_000 {
+		if !l.allow("anyone") {
+			t.Fatalf("a disabled limiter refused request %d", i)
+		}
+		if !l.ok("anyone") {
+			t.Fatalf("a disabled limiter reported no budget at %d", i)
+		}
+		l.spend("anyone")
+	}
+}
+
+func TestZeroRateMeansUnsetNotUnlimited(t *testing.T) {
+	// Leaving a field at its zero value must not silently disable the limit;
+	// disabling has to be asked for.
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(st, Config{Location: time.UTC, Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.loginLimit == nil || s.voterLimit == nil {
+		t.Fatal("an unconfigured Config disabled rate limiting")
+	}
+	if s.cfg.LoginRate != DefaultLoginRate || s.cfg.VoterRate != DefaultVoterRate {
+		t.Errorf("defaults not applied: login=%d voter=%d", s.cfg.LoginRate, s.cfg.VoterRate)
+	}
+
+	off, err := New(st, Config{LoginRate: -1, VoterRate: -1, Location: time.UTC,
+		Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if off.loginLimit != nil || off.voterLimit != nil {
+		t.Error("-1 did not disable the limiters")
 	}
 }
