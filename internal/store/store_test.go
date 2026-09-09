@@ -484,3 +484,97 @@ func TestOptionTextIsCappedServerSide(t *testing.T) {
 		t.Errorf("a write-in exactly at the cap was rejected: %v", err)
 	}
 }
+
+func TestSignOutRevokesEverySession(t *testing.T) {
+	s := newStore(t)
+	u, err := s.AddUser("alice", RoleAdmin, "password123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := u.SessionKey()
+	if err := s.RevokeSessions("alice"); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := s.User("alice")
+	if after.SessionKey() == before {
+		t.Error("the session key did not move, so existing cookies stay valid")
+	}
+	// The password still works — revoking sessions is not locking the account.
+	if _, ok := s.Authenticate("alice", "password123"); !ok {
+		t.Error("revoking sessions broke the password")
+	}
+	if reopen(t, s).SessionsFromOf(t, "alice").IsZero() {
+		t.Error("the revocation did not survive a restart")
+	}
+}
+
+// SessionsFromOf is a test helper.
+func (s *Store) SessionsFromOf(t *testing.T, name string) time.Time {
+	t.Helper()
+	u, ok := s.User(name)
+	if !ok {
+		t.Fatalf("no user %q", name)
+	}
+	return u.SessionsFrom
+}
+
+func TestLastAdminCannotBeDemoted(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.AddUser("root", RoleAdmin, "password123"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddUser("ed", RoleEditor, "password123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetRole("root", RoleViewer); err == nil {
+		t.Fatal("demoting the only admin should be refused — nobody could administer the instance")
+	}
+	if _, err := s.AddUser("root2", RoleAdmin, "password123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetRole("root", RoleViewer); err != nil {
+		t.Errorf("with a second admin present, demotion should work: %v", err)
+	}
+}
+
+func TestUsernameValidation(t *testing.T) {
+	s := newStore(t)
+	// "|" is the separator in a session cookie: such an account could be
+	// created and could then never sign in.
+	for _, bad := range []string{"", " ", "has|pipe", "has space", "-leading", ".dot",
+		"emoji😀", strings.Repeat("x", 65), "with/slash", "with\x00null"} {
+		if _, err := s.AddUser(bad, RoleViewer, "password123"); err == nil {
+			t.Errorf("username %q was accepted", bad)
+		}
+	}
+	for _, good := range []string{"alice", "a", "A1", "first.last", "with-dash", "with_underscore"} {
+		if _, err := s.AddUser(good, RoleViewer, "password123"); err != nil {
+			t.Errorf("username %q was rejected: %v", good, err)
+		}
+	}
+}
+
+// options.id is a primary key across every survey, and anonymous write-ins
+// mint them, so a collision used to rewrite another survey's option.
+func TestOptionIDsAreWideAndScopedToTheirSurvey(t *testing.T) {
+	s := newStore(t)
+	a := mustSurvey(t, s, "Alpha")
+	b := mustSurvey(t, s, "Beta")
+	if len(a.Options[0].ID) < 12 {
+		t.Errorf("option ID is %d characters; too narrow for a global primary key", len(a.Options[0].ID))
+	}
+	// Force the collision the width is meant to make improbable, and check it
+	// cannot reach across surveys.
+	if _, err := s.db.Exec(
+		`INSERT INTO options (id, survey_id, position, text, status, source, merged_into, created)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET text=excluded.text
+		 WHERE options.survey_id = excluded.survey_id`,
+		a.Options[0].ID, b.ID, 99, "hijacked", OptApproved, "editor", "", dbTime(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Survey(a.ID)
+	if got.Options[0].Text != "Alpha" {
+		t.Errorf("another survey's write overwrote this option: %q", got.Options[0].Text)
+	}
+}
