@@ -43,10 +43,19 @@ gives you no way to know what is running or to roll back. `latest` deliberately
 moves only on a version tag, never on a push to `main`, so it cannot quietly
 become an untested commit.
 
-**The package must be public.** Nothing in this cluster uses a private registry
-or an `imagePullSecret`. GHCR creates packages private on first push — find it
-under your GitHub profile → Packages → quicksurvey → Package settings → Change
-visibility. A private one fails as `ImagePullBackOff` with an unhelpful message.
+**The package must be public**, because nothing in this cluster uses a private
+registry or an `imagePullSecret`. GHCR inherits the repository's visibility, so
+a public repo gives a public package with nothing to do. Check it the way the
+cluster will, without credentials:
+
+```sh
+R=woodysmith1912/quicksurvey
+T=$(curl -s "https://ghcr.io/token?scope=repository:$R:pull&service=ghcr.io" | jq -r .token)
+curl -s -H "Authorization: Bearer $T" "https://ghcr.io/v2/$R/tags/list"
+```
+
+A tag list means the cluster can pull it. A private package fails as
+`ImagePullBackOff`, which does not say "it is private".
 
 The image carries a build provenance attestation, so you can check where it came
 from:
@@ -67,13 +76,23 @@ It must be changed at first sign-in before the account can do anything.
 
 ## Changing the hostname
 
-Edit `spec.rules[0].host` in `ingress.yaml`. Nothing else.
+Two places, deliberately:
 
-`QS_BASE_URL` in the StatefulSet is derived from it by a kustomize
-`replacements` block, so the two cannot drift. That matters more than it looks:
-if they disagree, the app still works, but every editor is handed a shareable
-link pointing at a host that does not serve the survey — a failure nobody
-notices until a respondent says the link is broken.
+- `spec.rules[0].host` in `ingress.yaml`
+- `QS_BASE_URL` in `statefulset.yaml`
+
+CI fails if they disagree, so forgetting the second is caught before it ships.
+
+An earlier version derived one from the other with a kustomize `replacements`
+block. That was worse: it failed *broken*. If a future `kubectl` changed the
+semantics of `replacements`, the placeholder would survive into production and
+every editor would be handed a link to a host that does not exist. A literal is
+already correct when the tooling misbehaves, and a check catches the mistake
+that actually happens — a human editing one file and not the other.
+
+Why `QS_BASE_URL` is set at all: without it the app reconstructs the origin from
+`X-Forwarded-Host`. Setting it explicitly means the app never trusts a header a
+client might try to influence.
 
 ## How this fits the cluster
 
