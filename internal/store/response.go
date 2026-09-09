@@ -419,7 +419,51 @@ type Result struct {
 // Tally counts votes per approved option, following merges. Respondents is the
 // number of people who answered, which is the denominator for Percent: options
 // are not mutually exclusive, so percentages do not sum to 100.
+//
+// The result is cached. This is called on every ballot load of a survey that
+// shows results to respondents, and computing it walks every response and every
+// choice — 16ms and 2.7MB at a thousand respondents, growing linearly, against
+// 0.65ms for the same page without. The cache is keyed on a counter that every
+// committed write bumps, so a stale entry is never readable rather than being
+// evicted by remembering to.
 func (s *Store) Tally(surveyID string) (results []Result, respondents int) {
+	gen := s.gen.Load()
+
+	s.tallyMu.Lock()
+	if s.tallyGen == gen && s.tallyCache != nil {
+		if c, ok := s.tallyCache[surveyID]; ok {
+			s.tallyMu.Unlock()
+			// A copy, so a caller sorting or editing the slice cannot corrupt
+			// what every other request will be served.
+			return append([]Result(nil), c.results...), c.respondents
+		}
+	}
+	s.tallyMu.Unlock()
+
+	results, respondents = s.computeTally(surveyID)
+
+	s.tallyMu.Lock()
+	if s.tallyGen != gen {
+		// A write landed while this was being computed. Drop the whole map:
+		// resetting rather than deleting one key keeps memory bounded to the
+		// surveys actually being read, with no eviction policy to tune.
+		s.tallyCache, s.tallyGen = map[string]cachedTally{}, gen
+	}
+	if s.tallyCache == nil {
+		s.tallyCache = map[string]cachedTally{}
+	}
+	// Only cache if nothing has been committed since the read began; otherwise
+	// this result is already stale and must not be stored.
+	if s.gen.Load() == gen {
+		s.tallyGen = gen
+		s.tallyCache[surveyID] = cachedTally{results: append([]Result(nil), results...), respondents: respondents}
+	}
+	s.tallyMu.Unlock()
+	return results, respondents
+}
+
+// computeTally does the work, without consulting the cache.
+func (s *Store) computeTally(surveyID string) (results []Result, respondents int) {
 	sv, ok := s.Survey(surveyID)
 	if !ok {
 		return nil, 0

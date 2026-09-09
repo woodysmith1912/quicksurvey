@@ -9,7 +9,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +29,11 @@ import (
 //	go test ./internal/web -bench Ballot -benchmem -run '^$'
 //	go test ./internal/web -bench Ballot -benchtime 5s -cpuprofile cpu.out -run '^$'
 //
+// QS_BENCH_FIXTURE points at a directory seeded by TestSeedLargeDataset, so the
+// benchmark runs against a realistically sized database — 10,000 surveys rather
+// than the one it would otherwise build. The survey it reads is picked from the
+// middle of that fixture, so index lookups are not flattered by locality.
+//
 // QS_BENCH_DIR points the database at real disk. Without it the data lands
 // wherever t.TempDir() does, which may be tmpfs, where fsync is nearly free —
 // harmless for these read benchmarks, misleading for anything that writes.
@@ -43,8 +50,57 @@ type benchEnv struct {
 	st      *store.Store
 }
 
+// existingFixture opens a seeded database, if one was pointed at, and returns a
+// survey from the middle of it.
+func existingFixture(b *testing.B, showResults bool) (*benchEnv, bool) {
+	b.Helper()
+	dir := os.Getenv("QS_BENCH_FIXTURE")
+	if dir == "" {
+		return nil, false
+	}
+	st, err := store.Open(dir)
+	if err != nil {
+		b.Fatalf("opening the fixture at %s: %v", dir, err)
+	}
+	b.Cleanup(func() { st.Close() })
+
+	ids, err := os.ReadFile(filepath.Join(dir, "seeded-survey-ids.txt"))
+	if err != nil {
+		b.Fatalf("no manifest in the fixture: %v", err)
+	}
+	lines := strings.Fields(string(ids))
+	if len(lines) == 0 {
+		b.Fatal("the fixture manifest is empty")
+	}
+	sv, ok := st.Survey(lines[len(lines)/2]) // the middle, not the first
+	if !ok {
+		b.Fatal("the survey named in the manifest is not in the database")
+	}
+	if showResults {
+		if sv, err = st.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+			d.ShowResults = true
+			return nil
+		}); err != nil {
+			b.Fatal(err)
+		}
+	}
+	s, err := New(st, Config{
+		Location: time.UTC, Logger: slog.New(slog.DiscardHandler),
+		LoginRate: -1, VoterRate: -1,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	srv := httptest.NewServer(s)
+	b.Cleanup(srv.Close)
+	return &benchEnv{srv: srv, surveyw: sv, st: st}, true
+}
+
 func newBenchEnv(b *testing.B, respondents int, showResults bool) *benchEnv {
 	b.Helper()
+	if e, ok := existingFixture(b, showResults); ok {
+		return e
+	}
 	dir := os.Getenv("QS_BENCH_DIR")
 	if dir == "" {
 		dir = b.TempDir()
@@ -156,6 +212,11 @@ func (e *benchEnv) vote(b *testing.B, c *http.Client, n int) {
 	m := benchCSRF.FindSubmatch(body)
 	if m == nil {
 		b.Fatal("no CSRF token on the ballot")
+	}
+	// A seeded survey has between 5 and 15 options, so "select ten" has to mean
+	// "select ten, or all of them if there are fewer".
+	if n > len(e.surveyw.Options) {
+		n = len(e.surveyw.Options)
 	}
 	form := url.Values{"csrf": {string(m[1])}}
 	for i := range n {
