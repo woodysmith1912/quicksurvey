@@ -20,7 +20,7 @@ See [DESIGN.md](DESIGN.md) for how it works and what its failure modes are, and
 ```sh
 make up                                    # docker compose up -d --build
 docker compose exec quicksurvey \
-  cat /data/initial-password               # the first admin password
+  quicksurvey initial-password             # the first admin password
 ```
 
 It is written to a file rather than the log, because a log outlives the
@@ -238,7 +238,14 @@ quicksurvey user passwd -name alice
 quicksurvey user role   -name alice -role admin
 quicksurvey user rm     -name alice
 quicksurvey export -survey abc123 -kind responses > out.tsv
+quicksurvey initial-password
+quicksurvey backup -to FILE|-
 ```
+
+`initial-password` and `backup -to -` exist because the container is
+distroless. There is no `cat` to read a file with, no shell to redirect in, and
+no `tar`, so `kubectl cp` cannot work either. Anything you need to do inside
+that container has to be something the binary does.
 
 The CLI does not suppress terminal echo when prompting for a password. Pipe it
 instead:
@@ -255,6 +262,7 @@ volume — though with a `ReadWriteOnce` volume that has to land on the same nod
 
 ```sh
 quicksurvey backup -to /backups/quicksurvey-$(date +%F).db
+quicksurvey backup -to -                  # or stream it, for a container
 ```
 
 Safe to run against a live instance. **Do not just copy `quicksurvey.db`** — in

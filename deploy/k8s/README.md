@@ -70,8 +70,12 @@ gh attestation verify oci://ghcr.io/woodysmith1912/quicksurvey:v0.1.0 \
 `admin` with a random password and writes it to a file on the volume:
 
 ```sh
-kubectl -n quicksurvey exec quicksurvey-0 -- cat /data/initial-password
+kubectl -n quicksurvey exec quicksurvey-0 -- quicksurvey initial-password
 ```
+
+Not `cat`: the image is distroless and contains no `cat`, and no shell to run
+one in. The binary is the only executable in it, so anything you need to do
+inside the container has to be something the binary does.
 
 Not the log. A log is shipped to aggregators, kept long after the password is
 changed, and readable by anyone with `kubectl logs` on the namespace — a wider
@@ -148,9 +152,12 @@ is exactly what WAL is for. For a guaranteed-clean file:
 
 ```sh
 kubectl -n quicksurvey exec quicksurvey-0 -- \
-  quicksurvey backup -to /data/backup-$(date +%F).db
-kubectl -n quicksurvey cp quicksurvey-0:/data/backup-$(date +%F).db ./backup.db
+  quicksurvey backup -to - > quicksurvey-$(date +%F).db
 ```
+
+Streamed rather than copied: `kubectl cp` runs `tar` inside the container, and
+there is no tar in a distroless image. `-to -` writes the snapshot to stdout,
+which needs nothing in the container but the binary.
 
 The backup carries the instance HMAC key. Restoring without it invalidates every
 session and voter cookie: responses survive, but returning respondents look new

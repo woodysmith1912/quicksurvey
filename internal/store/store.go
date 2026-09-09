@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -360,6 +361,55 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// BackupToWriter streams a consistent snapshot to w.
+//
+// It exists because the image is distroless: there is no tar in it, so
+// `kubectl cp` cannot work, and no shell to redirect with. Streaming to stdout
+// is the only way to get a file out of the container, and the binary has to
+// provide it because nothing else in the image can.
+//
+// VACUUM INTO needs a real destination, so the snapshot is written beside the
+// database and removed once it has been copied out.
+func (s *Store) BackupToWriter(w io.Writer) error {
+	tmp, err := os.CreateTemp(s.dir, ".backup-*")
+	if err != nil {
+		return err
+	}
+	path := tmp.Name()
+	tmp.Close()
+	// VACUUM INTO refuses to overwrite, so hand it a name that does not exist.
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	defer os.Remove(path)
+
+	if _, err := s.db.Exec(`VACUUM INTO ` + quoteSQLString(path)); err != nil {
+		return fmt.Errorf("preparing the snapshot: %w", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(w, f)
+	return err
+}
+
+// InitialPassword returns the bootstrap password if it has not yet been used.
+//
+// A subcommand rather than a documented `cat`: the image is distroless, so
+// there is no cat to run and no shell to run it in.
+func (s *Store) InitialPassword() (string, error) {
+	b, err := os.ReadFile(s.InitialPasswordFile())
+	if os.IsNotExist(err) {
+		return "", fmt.Errorf("no initial password on file: it is removed once the " +
+			"password has been changed, so this instance has already been set up")
+	} else if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(b)), nil
 }
 
 // BackupTo writes a consistent snapshot of the database to path, using SQLite's

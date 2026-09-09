@@ -5,7 +5,8 @@
 //	quicksurvey user add|list|passwd|role|rm
 //	quicksurvey export -survey ID [-kind responses|summary]
 //	quicksurvey healthcheck
-//	quicksurvey backup -to FILE
+//	quicksurvey backup -to FILE|-
+//	quicksurvey initial-password
 package main
 
 import (
@@ -52,7 +53,8 @@ func usage() error {
   quicksurvey user rm     -name NAME
   quicksurvey export      -survey ID [-kind responses|summary]
   quicksurvey healthcheck [-url URL]
-  quicksurvey backup      -to FILE
+  quicksurvey backup      -to FILE|-   ("-" streams to stdout)
+  quicksurvey initial-password
 
 The data directory comes from -data or $QS_DATA_DIR (default /data).`)
 }
@@ -72,6 +74,8 @@ func run(args []string) error {
 		return healthcheck(args[1:])
 	case "backup":
 		return backupCmd(args[1:])
+	case "initial-password":
+		return initialPasswordCmd(args[1:])
 	case "-h", "--help", "help":
 		fmt.Println(usage())
 		return nil
@@ -226,22 +230,54 @@ func healthcheck(args []string) error {
 func backupCmd(args []string) error {
 	fs := flag.NewFlagSet("backup", flag.ExitOnError)
 	dir := fs.String("data", env("QS_DATA_DIR", "/data"), "data directory ($QS_DATA_DIR)")
-	to := fs.String("to", "", "file to write the backup to")
+	to := fs.String("to", "", `file to write the backup to, or "-" for stdout`)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *to == "" {
-		return errors.New("-to is required")
+		return errors.New(`-to is required (use "-" to stream to stdout)`)
 	}
 	st, err := openStore(*dir)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+
+	// Streaming is how a backup leaves a distroless container: there is no tar
+	// in the image, so kubectl cp cannot work.
+	//
+	//	kubectl exec quicksurvey-0 -- quicksurvey backup -to - > backup.db
+	if *to == "-" {
+		return st.BackupToWriter(os.Stdout)
+	}
 	if err := st.BackupTo(*to); err != nil {
 		return err
 	}
 	fmt.Printf("wrote %s\n", *to)
+	return nil
+}
+
+// initialPasswordCmd prints the bootstrap administrator's password.
+//
+// This exists because the image is distroless. Documenting `exec ... cat
+// /data/initial-password` would be documenting a command that cannot run:
+// there is no cat in the image and no shell to run one.
+func initialPasswordCmd(args []string) error {
+	fs := flag.NewFlagSet("initial-password", flag.ExitOnError)
+	dir := fs.String("data", env("QS_DATA_DIR", "/data"), "data directory ($QS_DATA_DIR)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	st, err := openStore(*dir)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	pw, err := st.InitialPassword()
+	if err != nil {
+		return err
+	}
+	fmt.Println(pw)
 	return nil
 }
 
