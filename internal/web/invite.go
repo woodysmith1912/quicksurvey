@@ -110,3 +110,55 @@ func (s *Server) handleInvitesPost(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
 }
+
+// resetData drives the public password-reset page.
+type resetData struct {
+	Token string
+	Reset *store.Reset
+}
+
+func (s *Server) handleResetForm(w http.ResponseWriter, r *http.Request) {
+	rp, ok := s.store.ResetByToken(r.PathValue("token"))
+	if !ok {
+		s.fail(w, r, http.StatusNotFound,
+			errors.New("that reset link is not valid. It may have been used already, replaced by a newer one, or expired."))
+		return
+	}
+	s.voterToken(w, r) // issue the cookie the CSRF token derives from
+	s.render(w, r, http.StatusOK, "reset.html", "Choose a new password",
+		resetData{Token: r.PathValue("token"), Reset: rp})
+}
+
+func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
+	token := r.PathValue("token")
+	if !s.checkCSRF(r) {
+		s.fail(w, r, http.StatusForbidden, errors.New("your session expired; please reload and try again"))
+		return
+	}
+	rp, ok := s.store.ResetByToken(token)
+	if !ok {
+		s.loginLimit.spend(clientKey(r, s.cfg.TrustProxy))
+		s.fail(w, r, http.StatusNotFound, errors.New("that reset link is no longer valid"))
+		return
+	}
+	pw, confirm := r.FormValue("password"), r.FormValue("confirm")
+	fail := func(msg string) {
+		s.render(w, flashNow(r, msg, true), http.StatusBadRequest, "reset.html",
+			"Choose a new password", resetData{Token: token, Reset: rp})
+	}
+	if pw != confirm {
+		fail("The two passwords do not match.")
+		return
+	}
+	user, err := s.store.UseReset(token, pw)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	s.cfg.Logger.Info("password reset via link", "user", user)
+	// Every session for the account was revoked, including any this browser
+	// held, so send them to sign in with the password they just chose.
+	http.SetCookie(w, s.cookie(sessionCookie, "", 0))
+	s.setFlash(w, "Password set. Sign in with it now.", false)
+	http.Redirect(w, r, "/login", http.StatusSeeOther)
+}

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { createSurvey, publish, signIn, userRow } from '../helpers';
+import { createSurvey, deleteAccount, publish, signIn, userRow } from '../helpers';
 
 // These tests change instance-wide state, so each one cleans up the accounts it
 // creates. The suite runs with a single worker, in file order.
@@ -94,13 +94,56 @@ test.describe('accounts and roles', () => {
     await signIn(page);
     await page.goto('/admin/users');
 
-    await userRow(page, 'admin').getByTestId('delete-user').click();
+    const me = userRow(page, 'admin');
+    await me.getByTestId('delete-user-toggle').click();
+    await me.getByTestId('delete-user-confirm').fill('admin');
+    await me.getByTestId('delete-user').click();
     await expect(page.getByTestId('flash')).toContainText('cannot delete your own account');
 
     for (const name of ['val', 'eve']) {
-      await userRow(page, name).getByTestId('delete-user').click();
-      await expect(page.getByTestId('flash')).toContainText('deleted');
+      await deleteAccount(page, name);
     }
     await expect(page.getByTestId('user-row')).toHaveCount(1);
   });
+
+  test('an admin hands out a reset link and never sees the password', async ({ page, browser }) => {
+    await signIn(page);
+    await page.goto('/admin/users');
+    await page.getByTestId('new-username').fill('resetme');
+    await page.getByTestId('new-password').fill('password123');
+    await page.getByTestId('new-role').selectOption('viewer');
+    await page.getByTestId('add-user').click();
+
+    // The admin can only generate a link — there is no field to type someone
+    // else's password into.
+    await userRow(page, 'resetme').getByTestId('reset-link').click();
+    const link = (await page.getByTestId('reset-url').innerText()).trim();
+    expect(link).toContain('/reset/');
+    expect(page.url()).not.toContain('new_reset');
+
+    // The account owner chooses it.
+    const ctx = await browser.newContext();
+    const owner = await ctx.newPage();
+    await owner.goto(link);
+    await expect(owner.getByTestId('reset-user')).toHaveText('resetme');
+    await owner.getByTestId('reset-password').fill('chosen-by-the-owner');
+    await owner.getByTestId('reset-confirm').fill('chosen-by-the-owner');
+    await owner.getByTestId('reset-submit').click();
+    await expect(owner).toHaveURL(/\/login/);
+
+    await signIn(owner, 'resetme', 'chosen-by-the-owner');
+    await expect(owner.getByTestId('whoami')).toContainText('resetme');
+
+    // Used once, and only once.
+    const second = await browser.newContext();
+    const other = await second.newPage();
+    await other.goto(link);
+    await expect(other.getByTestId('error')).toBeVisible();
+
+    await ctx.close();
+    await second.close();
+    await page.goto('/admin/users');
+    await deleteAccount(page, 'resetme');
+  });
+
 });

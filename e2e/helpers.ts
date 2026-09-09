@@ -69,6 +69,18 @@ export function userRow(page: Page, name: string) {
   return page.locator(`[data-testid="user-row"][data-user="${name}"]`);
 }
 
+/**
+ * Deletes an account. Deletion cannot be undone, so the UI asks for the
+ * username to be retyped — the same guard survey deletion uses.
+ */
+export async function deleteAccount(page: Page, name: string) {
+  const row = userRow(page, name);
+  await row.getByTestId('delete-user-toggle').click();
+  await row.getByTestId('delete-user-confirm').fill(name);
+  await row.getByTestId('delete-user').click();
+  await expect(page.getByTestId('flash')).toContainText('deleted');
+}
+
 /** Reads the tally as a plain object of option text to vote count. */
 export async function tally(page: Page): Promise<Record<string, number>> {
   const out: Record<string, number> = {};

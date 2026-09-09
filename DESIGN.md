@@ -240,6 +240,32 @@ time a survey opens, its responses are discarded, because a survey that has
 never been open can only contain an editor's test data. Every later state change
 leaves responses alone, so closing and reopening a live survey is safe.
 
+## Password resets
+
+An administrator can hand out a reset link. They cannot set a password.
+
+The distinction matters more than it looks: an admin who sets a password can
+then sign in as that person, which is a different and larger power than managing
+accounts. Handing over a link keeps the two apart — the owner picks the secret
+and the admin never learns it.
+
+Mechanically it is the invitation flow again: 24 bytes of randomness in the URL,
+only `MAC(secret, "reset" ‖ token)` on disk, constant-time lookup, and the
+password change and the spending of the link in one transaction so a single link
+cannot set two passwords. Issuing a new link retires any outstanding one, so an
+account never has two live ways in. Using a link revokes that account's sessions,
+since a reset is usually a response to something going wrong.
+
+Two differences from invitations. The window is two hours rather than a week,
+because a reset is handed over during a conversation and used immediately. And
+the link is rendered directly from the request that created it rather than
+redirected to with the token in a query string, which would put the secret into
+browser history and the proxy's access log.
+
+The CLI can still set a password directly. That needs a shell inside the
+container, which is a different threat model, and it is the break-glass path
+when nobody can sign in at all.
+
 ## Roles
 
 | Role | Can |

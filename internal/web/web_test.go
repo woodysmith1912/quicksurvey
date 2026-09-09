@@ -1306,3 +1306,97 @@ func TestFailedLoginDoesNotLogWhatWasTyped(t *testing.T) {
 		t.Error("a failed sign-in against a real account should name it")
 	}
 }
+
+func TestAdminCannotSetAPasswordButCanHandOutAResetLink(t *testing.T) {
+	h := newHarness(t)
+	pw := h.seedUser("root", store.RoleAdmin)
+	h.seedUser("alice", store.RoleEditor)
+	admin := h.browser()
+	admin.login("root", pw)
+
+	// The old "set their password" action is gone, and asking for it does not
+	// quietly succeed.
+	token := admin.csrf("/admin/users")
+	admin.follow(admin.post("/admin/users", url.Values{
+		"csrf": {token}, "action": {"password"}, "username": {"alice"}, "password": {"chosen-by-admin"},
+	}))
+	if _, ok := h.st.Authenticate("alice", "chosen-by-admin"); ok {
+		t.Fatal("an admin set another account's password")
+	}
+	if strings.Contains(admin.get("/admin/users").body, `name="password" type="password" placeholder="new password"`) {
+		t.Error("the accounts page still offers a password field for other people")
+	}
+
+	// What they can do is hand over a link, rendered once, without the secret
+	// passing through a query string.
+	token = admin.csrf("/admin/users")
+	r := admin.post("/admin/users", url.Values{
+		"csrf": {token}, "action": {"reset-link"}, "username": {"alice"},
+	})
+	if r.status != http.StatusOK {
+		t.Fatalf("reset-link = %d, want the page rendered directly", r.status)
+	}
+	m := regexp.MustCompile(`data-testid="reset-url">([^<]+)<`).FindStringSubmatch(r.body)
+	if m == nil {
+		t.Fatal("no reset link shown")
+	}
+	link := strings.TrimPrefix(strings.TrimSpace(m[1]), h.srv.URL)
+	if strings.Contains(r.location, "new_reset") {
+		t.Error("the reset token went through a query string")
+	}
+
+	// Alice, not the admin, chooses the password.
+	alice := h.browser()
+	page := alice.get(link)
+	if page.status != 200 || !strings.Contains(page.body, "alice") {
+		t.Fatalf("reset page = %d", page.status)
+	}
+	token = alice.csrf(link)
+	if r := alice.post(link, url.Values{
+		"csrf": {token}, "password": {"alice picks this"}, "confirm": {"alice picks this"},
+	}); r.status != http.StatusSeeOther {
+		t.Fatalf("setting the password = %d\n%s", r.status, r.body)
+	}
+	if _, ok := h.st.Authenticate("alice", "alice picks this"); !ok {
+		t.Error("the password alice chose does not work")
+	}
+	// Spent.
+	if r := alice.get(link); r.status != http.StatusNotFound {
+		t.Errorf("a used reset link still renders: %d", r.status)
+	}
+}
+
+func TestAccountDeleteRequiresTheUsernameTyped(t *testing.T) {
+	h := newHarness(t)
+	pw := h.seedUser("root", store.RoleAdmin)
+	h.seedUser("alice", store.RoleEditor)
+	admin := h.browser()
+	admin.login("root", pw)
+
+	token := admin.csrf("/admin/users")
+	r := admin.follow(admin.post("/admin/users", url.Values{
+		"csrf": {token}, "action": {"delete"}, "username": {"alice"}, "confirm": {"wrong"},
+	}))
+	if _, ok := h.st.User("alice"); !ok {
+		t.Fatal("the account was deleted without a matching confirmation")
+	}
+	if !strings.Contains(r.body, "type the username exactly") {
+		t.Error("no explanation of why the deletion did not happen")
+	}
+	// Blank confirmation must not pass either.
+	token = admin.csrf("/admin/users")
+	admin.follow(admin.post("/admin/users", url.Values{
+		"csrf": {token}, "action": {"delete"}, "username": {"alice"},
+	}))
+	if _, ok := h.st.User("alice"); !ok {
+		t.Fatal("an empty confirmation deleted the account")
+	}
+
+	token = admin.csrf("/admin/users")
+	admin.follow(admin.post("/admin/users", url.Values{
+		"csrf": {token}, "action": {"delete"}, "username": {"alice"}, "confirm": {"alice"},
+	}))
+	if _, ok := h.st.User("alice"); ok {
+		t.Error("the account survived a correct confirmation")
+	}
+}

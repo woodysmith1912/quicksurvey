@@ -168,6 +168,11 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /invite/{token}", s.handleInviteForm)
 	m.HandleFunc("POST /invite/{token}", s.limitLogin(s.handleInviteClaim))
 
+	// Choosing a new password from a link an administrator handed over. Public
+	// for the same reason the invitation pages are: the token is the credential.
+	m.HandleFunc("GET /reset/{token}", s.handleResetForm)
+	m.HandleFunc("POST /reset/{token}", s.limitLogin(s.handleReset))
+
 	m.HandleFunc("GET /login", s.handleLoginForm)
 	m.HandleFunc("POST /login", s.limitLogin(s.handleLogin))
 	m.HandleFunc("POST /logout", s.handleLogout)
