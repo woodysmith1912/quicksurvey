@@ -69,11 +69,15 @@ spec:
             # is rebuilt from proxy headers, which is usually right and
             # occasionally embarrassing.
             #
-            # Kustomize overwrites this from the Ingress host, so the hostname
-            # is written in exactly one place. Drift here is quiet and nasty:
-            # editors get handed a link that does not resolve.
+            # Written out literally, and kept in step with the Ingress host by a
+            # CI check rather than by a kustomize replacement. A replacement
+            # would fail broken: if a future kubectl changed its semantics the
+            # placeholder would survive into production and editors would get
+            # links to a host that does not exist. A literal is already correct
+            # when the tooling misbehaves, and the check catches the error that
+            # actually happens — editing the host here and not there.
             - name: QS_BASE_URL
-              value: https://REPLACED-FROM-INGRESS
+              value: https://quicksurveys.plainwrapworks.com
             - name: QS_TZ
               value: America/New_York
             # Traefik terminates TLS, so cookies must be marked Secure.

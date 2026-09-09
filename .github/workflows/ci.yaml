@@ -117,19 +117,21 @@ jobs:
       - name: Render
         run: kubectl kustomize deploy/k8s > /tmp/rendered.yaml
 
-      - name: Check the hostname reached QS_BASE_URL
+      - name: Ingress host and QS_BASE_URL agree
+        # The one thing here that a human gets wrong: changing the hostname in
+        # ingress.yaml and not in statefulset.yaml. Nothing else notices — the
+        # app runs, every check passes, and editors are handed a shareable link
+        # to a host that serves nothing.
         run: |
-          if grep -q 'REPLACED-FROM-INGRESS' /tmp/rendered.yaml; then
-            echo "::error::the kustomize replacement did not fire; QS_BASE_URL is still a placeholder"
-            exit 1
-          fi
           host=$(grep -m1 -E '^[[:space:]]+- host:' /tmp/rendered.yaml | awk '{print $3}')
-          [ -n "$host" ] || { echo "::error::no Ingress host found in the rendered manifests"; exit 1; }
-          grep -q "https://$host" /tmp/rendered.yaml || {
-            echo "::error::QS_BASE_URL does not match the Ingress host ($host)"
+          base=$(grep -A1 'name: QS_BASE_URL' /tmp/rendered.yaml | grep 'value:' | awk '{print $2}')
+          echo "Ingress host: ${host:-<none>}"
+          echo "QS_BASE_URL:  ${base:-<none>}"
+          [ -n "$host" ] || { echo "::error::no Ingress host in the rendered manifests"; exit 1; }
+          [ "$base" = "https://$host" ] || {
+            echo "::error::QS_BASE_URL is $base but the Ingress serves $host"
             exit 1
           }
-          echo "Ingress host and QS_BASE_URL agree: $host"
 
   publish:
     name: Publish image
