@@ -1,14 +1,18 @@
 # QuickSurvey — development TODO
 
-<!-- Marking work for me: put FIX at the start of a line, anywhere in this file.
+<!-- Markers, for me:
 
-     - [ ] FIX  something that should be done next
-     FIX: this paragraph explains what is wanted
+     FIX   — do this next.
+             - [ ] FIX  short description
+             FIX: a paragraph explaining what is wanted
+             I grep `^\s*(- \[[ x~]\] )?(FIX|NPTF)\b` before starting.
 
-     I grep for `^\s*(- \[ \] )?FIX\b` before starting, do those, and remove the
-     marker as each one lands. Anything without it I leave alone unless asked.
-     Findings live in SECURITY-REVIEW.md, which is deliberately not committed;
-     the same marker works there. -->
+     NPTF  — No Plans To Fix. Acknowledged, understood, and deliberately
+             accepted as it stands. Not a backlog item and not an oversight:
+             a decision. I leave these alone, do not re-propose fixes for
+             them, and do not count them as outstanding work. If one should
+             be reopened, remove the marker.
+-->
 
 ## Next
 - [x] Deployed to DOKS at https://quicksurveys.plainwrapworks.com — real

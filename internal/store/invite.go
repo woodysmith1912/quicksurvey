@@ -184,8 +184,9 @@ func (s *Store) RevokeInvite(id string) error {
 // exists but can do nothing until an administrator approves it.
 func (s *Store) ClaimInvite(token, name, password string) (*User, error) {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil, fmt.Errorf("choose a username")
+	if !ValidUsername(name) {
+		return nil, fmt.Errorf("a username must be 1 to 64 characters of letters, " +
+			"digits, dot, dash or underscore, starting with a letter or digit")
 	}
 	if len(password) < 8 {
 		return nil, fmt.Errorf("password must be at least 8 characters")
@@ -215,8 +216,8 @@ func (s *Store) ClaimInvite(token, name, password string) (*User, error) {
 			Pending: true, InvitedBy: iv.CreatedBy,
 		}
 		if _, err := tx.Exec(
-			`INSERT INTO users (`+userColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			u.Name, u.Role, u.Hash, dbTime(u.Created), false, true, u.InvitedBy); err != nil {
+			`INSERT INTO users (`+userColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			u.Name, u.Role, u.Hash, dbTime(u.Created), false, true, u.InvitedBy, nil); err != nil {
 			return err
 		}
 		_, err = tx.Exec(`UPDATE invites SET claimed_by = ?, claimed = ? WHERE id = ?`,

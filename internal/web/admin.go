@@ -354,6 +354,10 @@ func (s *Server) handleUsersPost(w http.ResponseWriter, r *http.Request) {
 		err = s.store.ApproveUser(name, store.Role(r.FormValue("role")))
 		msg = name + " approved as " + r.FormValue("role") + "."
 	case "reject":
+		if name == me.Name {
+			err = errors.New("you cannot reject your own account")
+			break
+		}
 		err = s.store.DeleteUser(name)
 		msg = "Request from " + name + " rejected and the account removed."
 	case "add":

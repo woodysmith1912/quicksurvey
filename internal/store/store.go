@@ -123,7 +123,8 @@ CREATE TABLE IF NOT EXISTS users (
   created              TEXT NOT NULL,
   must_change_password INTEGER NOT NULL DEFAULT 0,
   pending              INTEGER NOT NULL DEFAULT 0,
-  invited_by           TEXT NOT NULL DEFAULT ''
+  invited_by           TEXT NOT NULL DEFAULT '',
+  sessions_from        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS invites (

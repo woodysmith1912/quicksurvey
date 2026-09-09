@@ -191,9 +191,13 @@ accounts. Unknown usernames still pay for one verification, so response time
 does not enumerate accounts.
 
 Sessions are stateless signed cookies: `name|expiry|HMAC(secret, name|expiry,
-password_hash)`. Including the password hash in the MAC means changing or
-resetting a password signs that user out everywhere, with no session table to
-keep. A restart does not sign anyone out, because the key is on disk.
+session_key)`, where the session key covers the user's password hash and a
+`sessions_from` instant. Changing a password invalidates every cookie, and so
+does signing out — which is what gives "Sign out" something to do, since
+clearing a cookie does nothing about a copy captured beforehand. There is no
+session table, so revocation is per account rather than per device: signing out
+signs out everywhere. For an administrative account that is the safer default.
+A restart signs nobody out, because the key is on disk.
 
 CSRF tokens are derived from whichever cookie identifies the caller — the
 session for accounts, the voter token for respondents. Both cookies are

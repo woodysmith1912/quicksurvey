@@ -1216,3 +1216,50 @@ func TestCookiesUseHostPrefixWhenSecure(t *testing.T) {
 		t.Errorf("__Host- cookie violates its own requirements: %+v", c)
 	}
 }
+
+func TestSignOutInvalidatesACapturedCookie(t *testing.T) {
+	h := newHarness(t)
+	pw := h.seedUser("alice", store.RoleAdmin)
+	b := h.browser()
+	b.login("alice", pw)
+
+	// A copy of the cookie, as an attacker who captured it would hold.
+	u, _ := url.Parse(b.base)
+	var stolen *http.Cookie
+	for _, c := range b.c.Jar.Cookies(u) {
+		if c.Name == sessionCookie {
+			stolen = c
+		}
+	}
+	if stolen == nil {
+		t.Fatal("no session cookie to capture")
+	}
+	if r := b.get("/admin/"); r.status != 200 {
+		t.Fatalf("signed-in request = %d", r.status)
+	}
+
+	token := b.csrf("/admin/")
+	b.follow(b.post("/logout", url.Values{"csrf": {token}}))
+
+	thief := h.browser()
+	thief.c.Jar.SetCookies(u, []*http.Cookie{stolen})
+	if r := thief.get("/admin/"); r.status == 200 {
+		t.Error("a cookie captured before sign-out still works; sign-out only cleared it locally")
+	}
+}
+
+func TestHSTSOnlyWhenSecure(t *testing.T) {
+	h := newHarness(t) // SecureCookies false
+	if got := h.browser().get("/").header.Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("HSTS sent over plain HTTP: %q", got)
+	}
+	h.web.cfg.SecureCookies = true
+	got := h.browser().get("/").header.Get("Strict-Transport-Security")
+	if got == "" {
+		t.Fatal("no HSTS header when serving over TLS")
+	}
+	// Neither is this application's to promise on behalf of sibling hostnames.
+	if strings.Contains(got, "includeSubDomains") || strings.Contains(got, "preload") {
+		t.Errorf("HSTS = %q; must not commit sibling hostnames", got)
+	}
+}

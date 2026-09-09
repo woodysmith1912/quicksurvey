@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -46,11 +47,25 @@ type User struct {
 	// administrator has approved yet. It can sign in and do nothing else.
 	Pending   bool   `json:"pending,omitempty"`
 	InvitedBy string `json:"invited_by,omitempty"`
+	// SessionsFrom is the instant before which session cookies for this
+	// account are no longer honoured. Bumping it is how a stateless design
+	// revokes: there is no session table to delete a row from.
+	SessionsFrom time.Time `json:"sessions_from,omitzero"`
 }
 
-// SessionKey is the value a session cookie is bound to. Including the password
-// hash means changing a password logs out that user everywhere.
-func (u *User) SessionKey() string { return u.Name + "\x00" + u.Hash }
+// SessionKey is the value a session cookie is bound to.
+//
+// The password hash is in it, so changing a password invalidates every cookie.
+// So is SessionsFrom, which gives signing out something to actually do: without
+// it, "Sign out" only cleared the cookie, and a copy captured beforehand stayed
+// valid for the rest of its twelve hours.
+//
+// The cost is that signing out signs this account out on every device. With no
+// session table there is nothing finer to revoke, and for an administrative
+// account that is the safer default anyway.
+func (u *User) SessionKey() string {
+	return u.Name + "\x00" + u.Hash + "\x00" + dbTime(u.SessionsFrom)
+}
 
 const pbkdf2Iterations = 600_000 // OWASP guidance for PBKDF2-HMAC-SHA256
 
@@ -95,18 +110,20 @@ func verifyPassword(encoded, password string) bool {
 	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
-const userColumns = `name, role, hash, created, must_change_password, pending, invited_by`
+const userColumns = `name, role, hash, created, must_change_password, pending, invited_by, sessions_from`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanUser(row rowScanner) (*User, error) {
 	var u User
 	var created string
+	var sessionsFrom sql.NullString
 	if err := row.Scan(&u.Name, &u.Role, &u.Hash, &created,
-		&u.MustChangePassword, &u.Pending, &u.InvitedBy); err != nil {
+		&u.MustChangePassword, &u.Pending, &u.InvitedBy, &sessionsFrom); err != nil {
 		return nil, err
 	}
 	u.Created = goTime(created)
+	u.SessionsFrom = goTimePtr(sessionsFrom)
 	return &u, nil
 }
 
@@ -121,10 +138,19 @@ func (s *Store) AddUserMustChange(name string, role Role, password string) (*Use
 	return s.addUser(name, role, password, true, false, "")
 }
 
+// validUsername keeps names to characters that survive every place a name is
+// used. "|" in particular is the separator in a session cookie, so an account
+// containing one could be created and could never sign in.
+var validUsername = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// ValidUsername reports whether a name is acceptable.
+func ValidUsername(name string) bool { return validUsername.MatchString(name) }
+
 func (s *Store) addUser(name string, role Role, password string, mustChange, pending bool, invitedBy string) (*User, error) {
 	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil, fmt.Errorf("username must not be empty")
+	if !ValidUsername(name) {
+		return nil, fmt.Errorf("a username must be 1 to 64 characters of letters, " +
+			"digits, dot, dash or underscore, starting with a letter or digit")
 	}
 	if !ValidRole(role) {
 		return nil, fmt.Errorf("unknown role %q", role)
@@ -141,8 +167,9 @@ func (s *Store) addUser(name string, role Role, password string, mustChange, pen
 		MustChangePassword: mustChange, Pending: pending, InvitedBy: invitedBy,
 	}
 	_, err = s.db.Exec(
-		`INSERT INTO users (`+userColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		u.Name, u.Role, u.Hash, dbTime(u.Created), u.MustChangePassword, u.Pending, u.InvitedBy)
+		`INSERT INTO users (`+userColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		u.Name, u.Role, u.Hash, dbTime(u.Created), u.MustChangePassword, u.Pending,
+		u.InvitedBy, nil)
 	if err != nil {
 		if isUnique(err) {
 			return nil, fmt.Errorf("user %q: %w", name, ErrExists)
@@ -167,13 +194,44 @@ func (s *Store) SetPassword(name, password string) error {
 	return affectedOne(res, err, name)
 }
 
-// SetRole changes a user's role.
+// RevokeSessions invalidates every session cookie this account holds, by moving
+// the instant they are bound to. Used by sign-out.
+func (s *Store) RevokeSessions(name string) error {
+	res, err := s.db.Exec(`UPDATE users SET sessions_from = ? WHERE name = ?`,
+		dbTime(time.Now().UTC()), name)
+	return affectedOne(res, err, name)
+}
+
+// SetRole changes a user's role. It refuses to demote the last administrator,
+// for the same reason DeleteUser refuses to remove them: an instance nobody can
+// administer is unrecoverable without shell access.
 func (s *Store) SetRole(name string, role Role) error {
 	if !ValidRole(role) {
 		return fmt.Errorf("unknown role %q", role)
 	}
-	res, err := s.db.Exec(`UPDATE users SET role = ? WHERE name = ?`, role, name)
-	return affectedOne(res, err, name)
+	return s.tx(func(tx *sql.Tx) error {
+		var current Role
+		var pending bool
+		err := tx.QueryRow(`SELECT role, pending FROM users WHERE name = ?`, name).Scan(&current, &pending)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("user %q: %w", name, ErrNotFound)
+		} else if err != nil {
+			return err
+		}
+		if current == RoleAdmin && !pending && role != RoleAdmin {
+			var others int
+			if err := tx.QueryRow(
+				`SELECT COUNT(*) FROM users WHERE role = ? AND pending = 0 AND name != ?`,
+				RoleAdmin, name).Scan(&others); err != nil {
+				return err
+			}
+			if others == 0 {
+				return fmt.Errorf("refusing to demote the last admin account")
+			}
+		}
+		_, err = tx.Exec(`UPDATE users SET role = ? WHERE name = ?`, role, name)
+		return err
+	})
 }
 
 // DeleteUser removes an account. The last administrator cannot be removed,

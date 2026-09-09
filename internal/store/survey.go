@@ -275,7 +275,8 @@ func saveSurvey(tx *sql.Tx, sv *Survey) error {
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 			   position=excluded.position, text=excluded.text, status=excluded.status,
-			   source=excluded.source, merged_into=excluded.merged_into`,
+			   source=excluded.source, merged_into=excluded.merged_into
+			 WHERE options.survey_id = excluded.survey_id`,
 			o.ID, sv.ID, i, o.Text, o.Status, o.Source, o.MergedInto, dbTime(o.Created)); err != nil {
 			return err
 		}
@@ -304,7 +305,7 @@ func (s *Store) CreateSurvey(title, description string, optionTexts []string) (*
 	for _, t := range optionTexts {
 		if t = strings.TrimSpace(t); t != "" {
 			sv.Options = append(sv.Options, Option{
-				ID: newID(6), Text: t, Status: OptApproved, Source: "editor", Created: now,
+				ID: newID(optionIDLen), Text: t, Status: OptApproved, Source: "editor", Created: now,
 			})
 		}
 	}
@@ -466,7 +467,7 @@ func AddOption(sv *Survey, text, status, source string) (string, error) {
 	if len(sv.Options) >= maxOptions {
 		return "", fmt.Errorf("survey already has the maximum of %d options", maxOptions)
 	}
-	o := Option{ID: newID(6), Text: text, Status: status, Source: source, Created: time.Now().UTC()}
+	o := Option{ID: newID(optionIDLen), Text: text, Status: status, Source: source, Created: time.Now().UTC()}
 	sv.Options = append(sv.Options, o)
 	return o.ID, nil
 }
@@ -475,3 +476,12 @@ const maxOptions = 500
 
 // MaxOptionText bounds any option's text, wherever it came from.
 const MaxOptionText = 200
+
+// optionIDLen is 12 rather than 6 because options.id is a primary key across
+// every survey, and anonymous write-ins mint them. Six characters of a 32-symbol
+// alphabet is 30 bits: a birthday collision reaches 1% at around 4,600 options
+// instance-wide, and a collision used to rewrite the *other* survey's option.
+// Twelve characters is 60 bits, where that probability stops being worth
+// thinking about. The upsert below is also scoped to the owning survey, so even
+// a collision cannot reach across surveys.
+const optionIDLen = 12

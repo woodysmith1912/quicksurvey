@@ -334,8 +334,15 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, http.StatusForbidden, errors.New("your session expired"))
 		return
 	}
+	// Clearing the cookie is not signing out: a copy captured beforehand stays
+	// valid until it expires. Move the instant sessions are bound to instead.
+	if u := s.sessionUser(r); u != nil {
+		if err := s.store.RevokeSessions(u.Name); err != nil {
+			s.cfg.Logger.Error("could not revoke sessions on sign-out", "user", u.Name, "err", err)
+		}
+	}
 	http.SetCookie(w, s.cookie(sessionCookie, "", 0))
-	s.setFlash(w, "Signed out.", false)
+	s.setFlash(w, "Signed out on every device.", false)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
