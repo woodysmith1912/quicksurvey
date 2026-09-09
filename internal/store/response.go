@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -291,6 +292,7 @@ func (s *Store) Responses(surveyID string) []*Response {
 		`SELECT id, voter, comment, created, updated FROM responses
 		 WHERE survey_id = ? ORDER BY created, id`, surveyID)
 	if err != nil {
+		slog.Error("could not read responses", "survey", surveyID, "err", err)
 		return nil
 	}
 	defer rows.Close()

@@ -202,11 +202,57 @@ CREATE TABLE IF NOT EXISTS choices (
 );
 `
 
+// addedColumns are columns introduced after a table first shipped.
+//
+// This list exists because CREATE TABLE IF NOT EXISTS does nothing at all to a
+// table that already exists — including adding a column to it. A database
+// created by an earlier version therefore keeps its old shape, every SELECT
+// naming the new column fails, and the application reports no data rather than
+// an error. That is exactly how a release shipped that could not read its own
+// users table.
+//
+// Anything added to a table after its first release belongs here as well as in
+// the schema above.
+var addedColumns = []struct{ table, column, decl string }{
+	{"users", "sessions_from", "TEXT"},
+}
+
 func (s *Store) migrate() error {
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("applying schema: %w", err)
 	}
+	for _, c := range addedColumns {
+		if err := s.ensureColumn(c.table, c.column, c.decl); err != nil {
+			return fmt.Errorf("adding %s.%s: %w", c.table, c.column, err)
+		}
+	}
 	return nil
+}
+
+// ensureColumn adds a column to an existing table unless it is already there.
+func (s *Store) ensureColumn(table, column, decl string) error {
+	rows, err := s.db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	slog.Info("upgrading the database", "table", table, "adding_column", column)
+	// Identifiers cannot be bound as parameters, and these are compile-time
+	// constants from addedColumns rather than anything a caller supplies.
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + decl)
+	return err
 }
 
 // loadOrCreateSecret returns the instance's HMAC key, minting one on first use.

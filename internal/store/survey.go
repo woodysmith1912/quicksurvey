@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/rand/v2"
 	"sort"
 	"strings"
@@ -328,6 +329,7 @@ func (s *Store) Survey(id string) (*Survey, bool) {
 func (s *Store) Surveys() []*Survey {
 	rows, err := s.db.Query(`SELECT ` + surveyColumns + ` FROM surveys ORDER BY created DESC`)
 	if err != nil {
+		slog.Error("could not read surveys", "err", err)
 		return nil
 	}
 	defer rows.Close()
