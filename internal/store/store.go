@@ -271,7 +271,39 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("adding %s.%s: %w", c.table, c.column, err)
 		}
 	}
+	if err := s.backfillSeen(); err != nil {
+		return fmt.Errorf("backfilling seen: %w", err)
+	}
 	return nil
+}
+
+// backfillSeen gives responses recorded before the seen table existed a seen
+// set, once. Nothing recorded what was on those ballots, so the assumption is
+// the one the share-of-respondents figure already made: everyone saw
+// everything. Guarded by a meta key rather than by the table being empty, so
+// options added after the upgrade are never marked as shown to people who
+// answered before they existed.
+func (s *Store) backfillSeen() error {
+	return s.tx(func(tx *sql.Tx) error {
+		var done int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM meta WHERE key = 'seen_backfilled'`).Scan(&done); err != nil {
+			return err
+		}
+		if done > 0 {
+			return nil
+		}
+		res, err := tx.Exec(
+			`INSERT OR IGNORE INTO seen (response_id, option_id)
+			 SELECT r.id, o.id FROM responses r JOIN options o ON o.survey_id = r.survey_id`)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			slog.Info("upgrading the database", "table", "seen", "backfilled_rows", n)
+		}
+		_, err = tx.Exec(`INSERT INTO meta (key, value) VALUES ('seen_backfilled', ?)`, []byte{1})
+		return err
+	})
 }
 
 // ensureColumn adds a column to an existing table unless it is already there.

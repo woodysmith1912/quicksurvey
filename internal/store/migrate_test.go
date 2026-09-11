@@ -112,6 +112,7 @@ func TestEveryQueriedColumnExistsAfterMigration(t *testing.T) {
 		"surveys":   `SELECT ` + surveyColumns + ` FROM surveys LIMIT 1`,
 		"responses": `SELECT id, voter, comment, created, updated FROM responses LIMIT 1`,
 		"options":   `SELECT id, text, status, source, merged_into, created FROM options LIMIT 1`,
+		"seen":      `SELECT response_id, option_id FROM seen LIMIT 1`,
 	} {
 		rows, err := s.db.Query(q)
 		if err != nil {
@@ -119,5 +120,66 @@ func TestEveryQueriedColumnExistsAfterMigration(t *testing.T) {
 			continue
 		}
 		rows.Close()
+	}
+}
+
+// Responses recorded before the seen table existed carry no record of what
+// was on their ballot. The upgrade treats them as having seen every option
+// in their survey — the assumption the old share-of-respondents figure already
+// made — and does so exactly once, so options added later are not
+// retroactively marked as shown to people who answered before they existed.
+func TestSeenIsBackfilledOnceForResponsesFromBeforeItExisted(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv := mustSurvey(t, s, "Alpha", "Bravo")
+	v := s.VoterID(sv.ID, "a")
+	if _, err := s.SaveResponse(sv.ID, v, []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	// Turn it into what the previous release would have left behind.
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, dbFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`DROP TABLE seen`, `DELETE FROM meta WHERE key = 'seen_backfilled'`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatalf("opening a database without the seen table failed: %v", err)
+	}
+	r, ok := s.ResponseFor(sv.ID, v)
+	if !ok {
+		t.Fatal("the response is gone")
+	}
+	if len(r.Seen) != 2 {
+		t.Fatalf("seen = %v after upgrade, want both options backfilled", r.Seen)
+	}
+
+	// An option added after the upgrade was not shown to anyone who answered
+	// before it. A second open must not backfill again.
+	if _, err := s.UpdateSurvey(sv.ID, func(d *Survey) error {
+		_, err := AddOption(d, "Charlie", OptApproved, "editor")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if r, _ := s.ResponseFor(sv.ID, v); len(r.Seen) != 2 {
+		t.Errorf("seen = %v after a second open, want the backfill to have run only once", r.Seen)
 	}
 }
