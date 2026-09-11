@@ -35,10 +35,10 @@ Which tag it publishes depends on what you pushed:
 | a commit to `main` | `main`, `sha-<full-sha>` |
 | a tag `v0.2.0` | `0.2.0`, `0.2`, `v0.2.0`, `latest`, `sha-<full-sha>` |
 
-The manifests pin `0.2.0` — OCI tags conventionally drop the leading `v`, so
-the git tag `v0.2.0` publishes the image `0.2.0` (and, since the tag-format fix,
-`v0.2.0` as well). It exists once you have
-pushed that git tag:
+The version to deploy is `newTag` in `kustomization.yaml`, and nowhere else.
+OCI tags conventionally drop the leading `v`, so the git tag `v0.2.0` publishes
+the image `0.2.0` (and `v0.2.0` as well, since CI also publishes the tag
+verbatim). The image exists once you have pushed the git tag:
 
 ```sh
 git tag v0.2.0 && git push origin v0.2.0
