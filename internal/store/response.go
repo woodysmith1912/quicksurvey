@@ -25,9 +25,13 @@ import (
 // first rather than adding to it, which is what stops anyone inflating a count
 // by resubmitting. Superseded answers are not retained.
 type Response struct {
-	ID      string    `json:"id"`
-	Voter   string    `json:"voter"`
-	Choices []string  `json:"choices"` // option IDs
+	ID      string   `json:"id"`
+	Voter   string   `json:"voter"`
+	Choices []string `json:"choices"` // option IDs
+	// Seen is every option that has been on this respondent's ballot at any
+	// submission. It only grows: an option removed after they answered stays,
+	// so restoring it restores its denominator too.
+	Seen    []string  `json:"seen"`
 	Comment string    `json:"comment,omitempty"`
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
@@ -37,6 +41,7 @@ type Response struct {
 func (r *Response) Clone() *Response {
 	c := *r
 	c.Choices = append([]string(nil), r.Choices...)
+	c.Seen = append([]string(nil), r.Seen...)
 	return &c
 }
 
@@ -44,6 +49,16 @@ func (r *Response) Clone() *Response {
 func (r *Response) Chose(id string) bool {
 	for _, c := range r.Choices {
 		if c == id {
+			return true
+		}
+	}
+	return false
+}
+
+// Saw reports whether the given option has ever been on this respondent's ballot.
+func (r *Response) Saw(id string) bool {
+	for _, s := range r.Seen {
+		if s == id {
 			return true
 		}
 	}
@@ -89,12 +104,30 @@ func (s *Store) saveResponse(surveyID, voter string, choices []string, comment, 
 	return out, nil
 }
 
+// visibleTo reports whether an option was on the ballot of a respondent whose
+// previous response is prev and who is proposing allowPending in this request:
+// every approved option, plus pending write-ins that are their own.
+//
+// This is the single definition. Choice filtering, carry-forward and the seen
+// set all use it, so they cannot drift apart.
+func visibleTo(o Option, prev *Response, allowPending string) bool {
+	switch o.Status {
+	case OptApproved:
+		return true
+	case OptPending:
+		return o.ID == allowPending || (prev != nil && prev.Chose(o.ID))
+	}
+	return false
+}
+
 // saveResponseTx is the body of SaveResponse, inside a caller's transaction.
 //
 // Choices are filtered against the survey: a respondent may select approved
 // options, pending write-ins they already had selected, and allowPending, which
 // is the option they are proposing in this same request. Anything else is
 // dropped rather than rejected, so a stale form does not lose the whole ballot.
+// The options that were visible are recorded as seen, unioned with whatever
+// earlier submissions saw.
 func saveResponseTx(tx *sql.Tx, surveyID, voter string, choices []string, comment, allowPending string, preview bool) (*Response, error) {
 	sv, err := loadSurvey(tx, surveyID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -116,25 +149,16 @@ func saveResponseTx(tx *sql.Tx, surveyID, voter string, choices []string, commen
 	if prev != nil {
 		r.ID, r.Created = prev.ID, prev.Created
 	}
-	seen := map[string]bool{}
+	picked := map[string]bool{}
 	for _, id := range choices {
 		o, ok := sv.Option(id)
-		if !ok || seen[id] {
+		if !ok || picked[id] || !visibleTo(o, prev, allowPending) {
+			// Unknown, duplicated, or not on their ballot (someone else's
+			// pending write-in, a removed option). Dropped rather than
+			// rejected, so a stale form does not lose the whole ballot.
 			continue
 		}
-		switch o.Status {
-		case OptApproved:
-		case OptPending:
-			// A pending write-in is selectable only by the person who proposed
-			// it: either they are proposing it right now, or their previous
-			// response already references it.
-			if id != allowPending && (prev == nil || !prev.Chose(id)) {
-				continue
-			}
-		default:
-			continue
-		}
-		seen[id] = true
+		picked[id] = true
 		r.Choices = append(r.Choices, id)
 	}
 	// Carry forward selections the respondent could not see.
@@ -151,19 +175,35 @@ func saveResponseTx(tx *sql.Tx, surveyID, voter string, choices []string, commen
 	// would undo. Neither leaves a trace in the count.
 	if prev != nil {
 		for _, id := range prev.Choices {
-			if seen[id] {
+			if picked[id] {
 				continue
 			}
-			o, ok := sv.Option(id)
-			if !ok {
-				continue
-			}
-			visible := o.Status == OptApproved ||
-				(o.Status == OptPending && (id == allowPending || prev.Chose(id)))
-			if !visible {
-				seen[id] = true
+			if o, ok := sv.Option(id); ok && !visibleTo(o, prev, allowPending) {
+				picked[id] = true
 				r.Choices = append(r.Choices, id)
 			}
+		}
+	}
+
+	// Record what was on the ballot. Once shown, always shown: a later
+	// submission adds to the set and never removes from it, so an option that
+	// is removed and restored keeps the denominator it had.
+	shown := map[string]bool{}
+	for _, o := range sv.Options {
+		if visibleTo(o, prev, allowPending) {
+			shown[o.ID] = true
+		}
+	}
+	if prev != nil {
+		for _, id := range prev.Seen {
+			shown[id] = true
+		}
+	}
+	// Walk the survey's order so the stored list is deterministic.
+	r.Seen = make([]string, 0, len(shown))
+	for _, o := range sv.Options {
+		if shown[o.ID] {
+			r.Seen = append(r.Seen, o.ID)
 		}
 	}
 
@@ -182,16 +222,38 @@ func saveResponseTx(tx *sql.Tx, surveyID, voter string, choices []string, commen
 		r.ID, surveyID, voter, r.Comment, dbTime(r.Created), dbTime(r.Updated)); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`DELETE FROM choices WHERE response_id = ?`, r.ID); err != nil {
-		return nil, err
-	}
-	for _, id := range r.Choices {
-		if _, err := tx.Exec(
-			`INSERT INTO choices (response_id, option_id) VALUES (?, ?)`, r.ID, id); err != nil {
+	for table, ids := range map[string][]string{"choices": r.Choices, "seen": r.Seen} {
+		// table is one of two compile-time constants, never caller input.
+		if _, err := tx.Exec(`DELETE FROM `+table+` WHERE response_id = ?`, r.ID); err != nil {
 			return nil, err
+		}
+		for _, id := range ids {
+			if _, err := tx.Exec(
+				`INSERT INTO `+table+` (response_id, option_id) VALUES (?, ?)`, r.ID, id); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return r.Clone(), nil
+}
+
+// loadIDs reads a one-column list, draining and closing the rows before it
+// returns, so a caller inside a transaction can issue its next query.
+func loadIDs(q queryer, query string, args ...any) ([]string, error) {
+	rows, err := q.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 func loadResponse(q queryer, surveyID, voter string) (*Response, error) {
@@ -204,19 +266,13 @@ func loadResponse(q queryer, surveyID, voter string) (*Response, error) {
 		return nil, err
 	}
 	r.Created, r.Updated = goTime(created), goTime(updated)
-	rows, err := q.Query(`SELECT option_id FROM choices WHERE response_id = ?`, r.ID)
-	if err != nil {
+	if r.Choices, err = loadIDs(q, `SELECT option_id FROM choices WHERE response_id = ?`, r.ID); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		r.Choices = append(r.Choices, id)
+	if r.Seen, err = loadIDs(q, `SELECT option_id FROM seen WHERE response_id = ?`, r.ID); err != nil {
+		return nil, err
 	}
-	return &r, rows.Err()
+	return &r, nil
 }
 
 const (
@@ -343,23 +399,32 @@ func (s *Store) Responses(surveyID string) []*Response {
 	for _, r := range out {
 		byID[r.ID] = r
 	}
-	crows, err := s.db.Query(
-		`SELECT c.response_id, c.option_id FROM choices c
+	s.attach(surveyID, "choices", byID, func(r *Response, id string) { r.Choices = append(r.Choices, id) })
+	s.attach(surveyID, "seen", byID, func(r *Response, id string) { r.Seen = append(r.Seen, id) })
+	return out
+}
+
+// attach appends each (response, option) pair in a child table to its response.
+// table is one of two compile-time constants, never caller input.
+func (s *Store) attach(surveyID, table string, byID map[string]*Response, add func(*Response, string)) {
+	rows, err := s.db.Query(
+		`SELECT c.response_id, c.option_id FROM `+table+` c
 		 JOIN responses r ON r.id = c.response_id WHERE r.survey_id = ?`, surveyID)
 	if err != nil {
-		return out
+		slog.Error("could not read "+table, "survey", surveyID, "err", err)
+		return
 	}
-	defer crows.Close()
-	for crows.Next() {
+	defer rows.Close()
+	for rows.Next() {
 		var rid, oid string
-		if err := crows.Scan(&rid, &oid); err != nil {
-			return out
+		if err := rows.Scan(&rid, &oid); err != nil {
+			slog.Error("could not read "+table, "survey", surveyID, "err", err)
+			return
 		}
 		if r, ok := byID[rid]; ok {
-			r.Choices = append(r.Choices, oid)
+			add(r, oid)
 		}
 	}
-	return out
 }
 
 // Count reports how many people have responded to a survey.
