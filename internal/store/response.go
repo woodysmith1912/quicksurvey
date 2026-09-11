@@ -508,12 +508,20 @@ func (s *Store) Publish(surveyID string) (discarded int, err error) {
 type Result struct {
 	Option  Option
 	Votes   int
-	Percent float64 // share of respondents who selected it
+	Percent float64 // share of all respondents who selected it
+	// Shown is how many respondents had this option on their ballot at some
+	// submission. It is below the respondent count for an option added after
+	// some people had already answered.
+	Shown int
+	// ShownPercent is Votes as a share of Shown: of the people who saw it,
+	// how many picked it. Zero when nobody has been shown it.
+	ShownPercent float64
 }
 
-// Tally counts votes per approved option, following merges. Respondents is the
-// number of people who answered, which is the denominator for Percent: options
-// are not mutually exclusive, so percentages do not sum to 100.
+// Tally counts votes per approved option, following merges, and how many
+// respondents were shown each one. Respondents is the number of people who
+// answered, which is the denominator for Percent: options are not mutually
+// exclusive, so percentages do not sum to 100.
 //
 // The result is cached. This is called on every ballot load of a survey that
 // shows results to respondents, and computing it walks every response and every
@@ -563,31 +571,40 @@ func (s *Store) computeTally(surveyID string) (results []Result, respondents int
 	if !ok {
 		return nil, 0
 	}
-	counts := map[string]int{}
+	counts, shown := map[string]int{}, map[string]int{}
 	for _, r := range s.Responses(surveyID) {
 		respondents++
-		counted := map[string]bool{}
-		for _, id := range r.Choices {
-			// Two merged options can resolve to the same target; one person
-			// must still only count once for it.
-			if target, ok := sv.Resolve(id); ok && !counted[target] {
-				counted[target] = true
-				counts[target]++
-			}
-		}
+		// Two merged options can resolve to the same target; one person must
+		// still only count once for it, both as a vote and as an exposure.
+		countOnce(sv, r.Choices, counts)
+		countOnce(sv, r.Seen, shown)
 	}
 	for _, o := range sv.Options {
 		if o.Status != OptApproved {
 			continue
 		}
-		res := Result{Option: o, Votes: counts[o.ID]}
+		res := Result{Option: o, Votes: counts[o.ID], Shown: shown[o.ID]}
 		if respondents > 0 {
 			res.Percent = 100 * float64(res.Votes) / float64(respondents)
+		}
+		if res.Shown > 0 {
+			res.ShownPercent = 100 * float64(res.Votes) / float64(res.Shown)
 		}
 		results = append(results, res)
 	}
 	sortResultsByVotes(results)
 	return results, respondents
+}
+
+// countOnce increments into[target] once per distinct resolved target among ids.
+func countOnce(sv *Survey, ids []string, into map[string]int) {
+	done := map[string]bool{}
+	for _, id := range ids {
+		if target, ok := sv.Resolve(id); ok && !done[target] {
+			done[target] = true
+			into[target]++
+		}
+	}
 }
 
 func sortResultsByVotes(results []Result) {
