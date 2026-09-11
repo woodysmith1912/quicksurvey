@@ -78,7 +78,8 @@ func header(o store.Option) string {
 }
 
 // Responses writes the wide, one-row-per-response table: a column per option
-// holding 1 or 0, plus the comment. This is the shape you pivot in Sheets.
+// holding 1 (picked), 0 (shown, not picked) or blank (never on that person's ballot), plus the comment.
+// This is the shape you pivot in Sheets.
 //
 // Merged options are omitted as columns because their votes already appear
 // under the option they were merged into.
@@ -105,10 +106,16 @@ func Responses(w io.Writer, sv *store.Survey, responses []*store.Response, loc *
 		rec := []string{r.ID, r.Created.In(loc).Format(time.RFC3339), r.Updated.In(loc).Format(time.RFC3339)}
 		n := 0
 		for _, o := range cols {
-			if r.Chose(o.ID) {
+			switch {
+			case r.Chose(o.ID):
 				rec, n = append(rec, "1"), n+1
-			} else {
+			case r.Saw(o.ID):
 				rec = append(rec, "0")
+			default:
+				// Never on this person's ballot. Blank rather than 0, so a
+				// column's AVERAGE in Sheets is the share of those who were
+				// shown it and its COUNT is how many were.
+				rec = append(rec, "")
 			}
 		}
 		rec = append(rec, fmt.Sprint(n), textCell(r.Comment))
@@ -119,17 +126,20 @@ func Responses(w io.Writer, sv *store.Survey, responses []*store.Response, loc *
 	return bw.Flush()
 }
 
-// Summary writes the tally: one row per option with vote count and the share of
-// respondents who chose it. Percentages do not sum to 100, because a respondent
-// may thumbs-up any number of options.
+// Summary writes the tally: one row per option with its vote count, its share
+// of all respondents, how many respondents were shown it, and its share of
+// those. Percentages do not sum to 100, because a respondent may thumbs-up any
+// number of options.
 func Summary(w io.Writer, sv *store.Survey, results []store.Result, respondents int) error {
 	bw := bufio.NewWriter(w)
-	if err := row(bw, "option", "votes", "respondents", "percent_of_respondents"); err != nil {
+	if err := row(bw, "option", "votes", "respondents", "percent_of_respondents",
+		"shown_to", "percent_of_shown"); err != nil {
 		return err
 	}
 	for _, res := range results {
 		if err := row(bw, textCell(res.Option.Text), fmt.Sprint(res.Votes), fmt.Sprint(respondents),
-			fmt.Sprintf("%.1f", res.Percent)); err != nil {
+			fmt.Sprintf("%.1f", res.Percent), fmt.Sprint(res.Shown),
+			fmt.Sprintf("%.1f", res.ShownPercent)); err != nil {
 			return err
 		}
 	}
