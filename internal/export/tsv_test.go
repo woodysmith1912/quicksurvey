@@ -159,11 +159,60 @@ func TestSummaryTSV(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows := grid(b.String())
-	if rows[0][0] != "option" || rows[0][3] != "percent_of_respondents" {
+	if rows[0][0] != "option" || rows[0][3] != "percent_of_respondents" ||
+		rows[0][4] != "shown_to" || rows[0][5] != "percent_of_shown" {
 		t.Errorf("header = %v", rows[0])
 	}
-	if rows[1][0] != "Rock climbing" || rows[1][1] != "3" || rows[1][2] != "4" || rows[1][3] != "75.0" {
-		t.Errorf("top row = %v, want [Rock climbing 3 4 75.0]", rows[1])
+	if rows[1][0] != "Rock climbing" || rows[1][1] != "3" || rows[1][2] != "4" || rows[1][3] != "75.0" ||
+		rows[1][4] != "4" || rows[1][5] != "75.0" {
+		t.Errorf("top row = %v, want [Rock climbing 3 4 75.0 4 75.0]", rows[1])
+	}
+}
+
+// An option someone never had on their ballot is blank, not 0. In Sheets,
+// AVERAGE over the column then gives the share of those shown it, and COUNT
+// gives how many were.
+func TestAnOptionNeverShownToARespondentIsBlankNotZero(t *testing.T) {
+	s, sv := fixture(t)
+	if _, err := s.SaveResponse(sv.ID, "v1", []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	late, err := s.AddWriteIn(sv.ID, "v2", "Karaoke")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		return store.SetOptionStatus(d, late, store.OptApproved, "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveResponse(sv.ID, "v3", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	sv, _ = s.Survey(sv.ID)
+
+	var b strings.Builder
+	if err := Responses(&b, sv, s.Responses(sv.ID), time.UTC); err != nil {
+		t.Fatal(err)
+	}
+	rows := grid(b.String())
+	col := -1
+	for i, h := range rows[0] {
+		if h == "Karaoke" {
+			col = i
+		}
+	}
+	if col < 0 {
+		t.Fatalf("Karaoke column missing from %v", rows[0])
+	}
+	// v1 answered before it existed; v2 proposed it; v3 saw it and passed.
+	if got := []string{rows[1][col], rows[2][col], rows[3][col]}; got[0] != "" || got[1] != "1" || got[2] != "0" {
+		t.Errorf("Karaoke column = %q, want [\"\" \"1\" \"0\"]", got)
+	}
+	for i, r := range rows {
+		if len(r) != len(rows[0]) {
+			t.Errorf("row %d has %d fields, want %d", i, len(r), len(rows[0]))
+		}
 	}
 }
 
