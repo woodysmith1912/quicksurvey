@@ -40,6 +40,7 @@ Three packages plus a CLI:
 - **All writes go through `Store.tx`.** It bumps a global generation counter that invalidates the tally cache. A write path that bypasses it serves stale counts; `TestTallyCacheIsInvalidatedByEveryWritePath` checks each path.
 - **Options are never deleted.** Status transitions instead: `approved`, `pending`, `rejected`, `removed`, `merged`. `Resolve` follows merge pointers (bounded, so cycles resolve to "not counted"). Responses reference option IDs forever.
 - **A resubmission only touches options the respondent could see.** Choices for removed/merged options are carried forward untouched. Taking the form literally lost votes; see `option_edit_test.go`.
+- **`seen` records what was on the ballot at submit, unioned across submissions.** Visibility has one definition, `visibleTo` in `response.go`; use it rather than re-deriving approved-plus-own-pending. For every approved option `Votes <= Shown <= respondents`.
 - **`FirstOpenedAt` is stamped in `saveSurvey`, not `Publish`.** The first open discards a draft's preview responses; every later state change leaves responses alone.
 - **Anonymity:** voter ID is `HMAC(key, "voter"‖survey‖token)[:22]`. Never store the raw cookie token, an IP, or a user agent with a response.
 - **Secrets never hit disk in the clear.** Invite and reset links store only `HMAC(key, prefix‖token)`; lookup is constant-time across all digests. Claiming/using a link and its side effect happen in one transaction. Setting a password by any route retires outstanding reset links.
