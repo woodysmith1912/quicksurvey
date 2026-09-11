@@ -1,6 +1,6 @@
 # Deploying QuickSurvey to DOKS
 
-Manifests for the `DOKS` cluster. Eight objects in a new
+Manifests for a DigitalOcean Kubernetes cluster. Eight objects in a new
 `quicksurvey` namespace.
 
 ```sh
@@ -10,10 +10,15 @@ kubectl apply -k deploy/k8s
 ## Before you apply
 
 **1. Point DNS at Traefik.** `quicksurveys.plainwrapworks.com` must resolve to
-`<LB-IP>` — the `traefik-ingress-service` LoadBalancer. See
-[../dns.md](../dns.md); the zone is in DigitalOcean and the records already
-exist, but the delegation at the registrar still has to be pointed at
-`ns1/ns2/ns3.digitalocean.com`.
+the external address of the `traefik-ingress-service` LoadBalancer:
+
+```sh
+kubectl get svc -A --field-selector metadata.name=traefik-ingress-service \
+  -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}'
+```
+
+Create an A record for the host pointing at that address. The address is
+stable for the life of the load balancer; recreating the LB changes it.
 
 Do this *before* applying. Traefik obtains certificates by TLS-ALPN challenge,
 which resolves the hostname, and Let's Encrypt rate-limits failed validations at
@@ -183,4 +188,4 @@ kubectl -n quicksurvey exec -it quicksurvey-0 -- quicksurvey user list
 | `exec ...: operation not permitted` | `allowPrivilegeEscalation: false` colliding with an AppArmor profile transition. Seen on snap-packaged Docker; should not occur on DOKS, but that is the symptom |
 | Pod `Pending`, `Multi-Attach error` | Two pods want the RWO volume. Should not happen with a StatefulSet; check nothing was scaled past one |
 | `ImagePullBackOff` | The GHCR package is still private |
-| Serves HTTP, no certificate | DNS not yet pointing at `<LB-IP>`, so the TLS-ALPN challenge cannot resolve |
+| Serves HTTP, no certificate | DNS not yet pointing at the load balancer, so the TLS-ALPN challenge cannot resolve |

@@ -13,8 +13,8 @@
 # exactly like this one. Adding a tls: section here would ask Traefik for a
 # secret that nothing creates.
 #
-# BEFORE APPLYING: point quicksurveys.plainwrapworks.com at <LB-IP>, the
-# traefik-ingress-service LoadBalancer. The TLS-ALPN challenge resolves the
+# BEFORE APPLYING: point quicksurveys.plainwrapworks.com at the external IP of
+# the traefik-ingress-service LoadBalancer. The TLS-ALPN challenge resolves the
 # hostname, so issuance fails until DNS is live.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
