@@ -235,6 +235,16 @@ CREATE TABLE IF NOT EXISTS choices (
   option_id   TEXT NOT NULL,
   PRIMARY KEY (response_id, option_id)
 );
+
+-- Which options were on the ballot a respondent submitted, unioned across all
+-- of their submissions. Votes divided by this is the share of people who were
+-- shown an option and picked it, which is the only fair figure for an option
+-- added after some people had already answered.
+CREATE TABLE IF NOT EXISTS seen (
+  response_id TEXT NOT NULL REFERENCES responses(id) ON DELETE CASCADE,
+  option_id   TEXT NOT NULL,
+  PRIMARY KEY (response_id, option_id)
+);
 `
 
 // addedColumns are columns introduced after a table first shipped.
