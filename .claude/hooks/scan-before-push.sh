@@ -3,7 +3,9 @@
 # scan everything that push could publish -- every commit reachable from a
 # local branch or tag but not from any remote-tracking ref: trees, commit
 # messages and author/committer identities -- for non-public data, and deny
-# the push if anything is found.
+# the push if anything is found. The index is scanned too, because the hook
+# runs before the command does: a "git commit && git push" in one command
+# would otherwise publish staged content no commit had yet been scanned for.
 #
 # "Non-public" here means:
 #   * secrets: private keys, cloud and VCS tokens;
@@ -96,13 +98,18 @@ case "$mode" in
   history) commits=$(git rev-list --all 2>/dev/null) ;;
   *)       commits=$(git rev-list --branches --tags --not --remotes 2>/dev/null) ;;
 esac
-[ -n "$commits" ] || exit 0
 
 hits=""
 add() { [ -n "$1" ] && hits="$hits$1
 "; }
 
+# Staged content: what the next commit in this same command would contain.
+add "$(git grep --cached -I -n -E -f "$pat" -- 2>/dev/null | sed "s/^/(index): /")"
+add "$(git grep --cached -I -n -o -E "$IPV4" -- 2>/dev/null | public_ipv4 | sed "s/^/(index): /;s/\$/ (public IP)/")"
+add "$(git grep --cached -I -n -o -E "$EMAIL" -- 2>/dev/null | foreign_email | sed "s/^/(index): /;s/\$/ (e-mail)/")"
+
 for c in $commits; do
+  [ -n "$c" ] || continue
   short=$(git rev-parse --short "$c")
   add "$(git grep -I -n -E -f "$pat" "$c" -- 2>/dev/null | sed "s/^$c:/$short: /")"
   add "$(git grep -I -n -o -E "$IPV4" "$c" -- 2>/dev/null | public_ipv4 | sed "s/^$c:/$short: /;s/\$/ (public IP)/")"
@@ -116,16 +123,16 @@ for c in $commits; do
   add "$(git log -1 --format='%an <%ae>%n%cn <%ce>' "$c" | grep -v -F -x "$OWNER" | sort -u | sed "s/^/$short: (identity):/;s/\$/ is not $OWNER/")"
 done
 
+n=$(printf '%s' "$commits" | grep -c . || true)
 if [ -z "$hits" ]; then
-  [ "$mode" = hook ] || echo "clean: $(printf '%s\n' "$commits" | wc -l | tr -d ' ') commit(s) scanned$note"
+  [ "$mode" = hook ] || echo "clean: $n commit(s) and the index scanned$note"
   exit 0
 fi
 
 # One line per distinct path:line:text, keeping the first commit it was seen in.
 summary=$(printf '%s' "$hits" | awk -F': ' '{ k = $0; sub(/^[^:]*: /, "", k) } !seen[k]++' | head -n 60)
-n=$(printf '%s\n' "$commits" | wc -l | tr -d ' ')
-reason="Push blocked: non-public data found in $n commit(s)$note.
-Matches (commit: path:line: text):
+reason="Push blocked: non-public data found ($n commit(s) and the index scanned)$note.
+Matches (commit or index: path:line: text):
 $summary
 
 Remove or redact it (amend, or rewrite the unpushed commits), then push again."
