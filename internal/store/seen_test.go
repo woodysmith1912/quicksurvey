@@ -113,3 +113,131 @@ func TestSeenGrowsAcrossSubmissionsAndNeverShrinks(t *testing.T) {
 		}
 	}
 }
+
+// shownByText returns Result.Shown keyed by option text.
+func shownByText(t *testing.T, s *Store, surveyID string) map[string]int {
+	t.Helper()
+	results, _ := s.Tally(surveyID)
+	out := map[string]int{}
+	for _, r := range results {
+		out[r.Option.Text] = r.Shown
+	}
+	return out
+}
+
+// checkTallyInvariant insists that for every option, votes <= shown <=
+// respondents. A respondent can only pick what was on their ballot, and every
+// seen row belongs to a respondent.
+func checkTallyInvariant(t *testing.T, s *Store, surveyID string) {
+	t.Helper()
+	results, respondents := s.Tally(surveyID)
+	for _, r := range results {
+		if r.Votes > r.Shown || r.Shown > respondents {
+			t.Errorf("%s: votes %d, shown %d, respondents %d — invariant broken",
+				r.Option.Text, r.Votes, r.Shown, respondents)
+		}
+	}
+}
+
+func TestInterestIsTheShareOfThoseWhoWereShownAnOption(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Alpha")
+	a, b := s.VoterID(sv.ID, "a"), s.VoterID(sv.ID, "b")
+	if _, err := s.SaveResponse(sv.ID, a, []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveResponse(sv.ID, b, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	// a suggests Charlie, which is approved. b never comes back.
+	charlie, err := s.AddWriteIn(sv.ID, a, "Charlie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateSurvey(sv.ID, func(d *Survey) error {
+		return SetOptionStatus(d, charlie, OptApproved, "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	results, respondents := s.Tally(sv.ID)
+	if respondents != 2 {
+		t.Fatalf("respondents = %d, want 2", respondents)
+	}
+	byText := map[string]Result{}
+	for _, r := range results {
+		byText[r.Option.Text] = r
+	}
+	alpha, ch := byText["Alpha"], byText["Charlie"]
+	if alpha.Shown != 2 || alpha.Votes != 1 || alpha.Percent != 50 || alpha.ShownPercent != 50 {
+		t.Errorf("Alpha = %+v, want shown 2, votes 1, both shares 50", alpha)
+	}
+	if ch.Shown != 1 || ch.Votes != 1 || ch.Percent != 50 || ch.ShownPercent != 100 {
+		t.Errorf("Charlie = %+v, want shown 1, votes 1, share 50 but interest 100", ch)
+	}
+	checkTallyInvariant(t, s, sv.ID)
+}
+
+func TestShownFollowsMergesWithoutDoubleCounting(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Pizza")
+	pizza := sv.Options[0].ID
+	both := s.VoterID(sv.ID, "both")
+	if _, err := s.SaveResponse(sv.ID, both, []string{pizza}, ""); err != nil {
+		t.Fatal(err)
+	}
+	dupe, err := s.AddWriteIn(sv.ID, both, "pizza!!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	only := s.VoterID(sv.ID, "only")
+	dupe2, err := s.AddWriteIn(sv.ID, only, "PIZZA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{dupe, dupe2} {
+		if _, err := s.UpdateSurvey(sv.ID, func(d *Survey) error {
+			return SetOptionStatus(d, id, OptMerged, pizza)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// "both" saw Pizza and its duplicate; "only" saw Pizza and theirs. Two
+	// people, not four exposures.
+	if got := shownByText(t, s, sv.ID)["Pizza"]; got != 2 {
+		t.Errorf("Pizza shown = %d, want 2 — a person who saw an option and its duplicate counts once", got)
+	}
+	checkTallyInvariant(t, s, sv.ID)
+}
+
+func TestRemovingAndRestoringAnOptionKeepsItsShownCount(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Alpha", "Bravo")
+	bravo := sv.Options[1].ID
+	for _, who := range []string{"a", "b"} {
+		if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, who), []string{bravo}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setStatus := func(status string) {
+		t.Helper()
+		if _, err := s.UpdateSurvey(sv.ID, func(d *Survey) error {
+			return SetOptionStatus(d, bravo, status, "")
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setStatus(OptRemoved)
+	// One person resubmits while it is off the ballot.
+	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	setStatus(OptApproved)
+	results, _ := s.Tally(sv.ID)
+	for _, r := range results {
+		if r.Option.ID == bravo && (r.Shown != 2 || r.Votes != 2) {
+			t.Errorf("restored Bravo: shown %d votes %d, want 2 and 2", r.Shown, r.Votes)
+		}
+	}
+	checkTallyInvariant(t, s, sv.ID)
+}

@@ -21,6 +21,14 @@ func TestTallyCacheIsInvalidatedByEveryWritePath(t *testing.T) {
 		}
 		return out
 	}
+	shown := func() map[string]int {
+		results, _ := s.Tally(sv.ID)
+		out := map[string]int{}
+		for _, r := range results {
+			out[r.Option.Text] = r.Shown
+		}
+		return out
+	}
 	// Prime the cache.
 	if got := votes()["Alpha"]; got != 0 {
 		t.Fatalf("Alpha = %d, want 0", got)
@@ -32,6 +40,9 @@ func TestTallyCacheIsInvalidatedByEveryWritePath(t *testing.T) {
 	}
 	if got := votes()["Alpha"]; got != 1 {
 		t.Errorf("after a vote, Alpha = %d, want 1 — the cache was not invalidated", got)
+	}
+	if got := shown()["Alpha"]; got != 1 {
+		t.Errorf("after a vote, Alpha shown = %d, want 1 — the cache was not invalidated", got)
 	}
 
 	// 2. The same person changing their mind.
@@ -57,6 +68,9 @@ func TestTallyCacheIsInvalidatedByEveryWritePath(t *testing.T) {
 	}
 	if got := votes()["Delta"]; got != 1 {
 		t.Errorf("after approval, Delta = %d, want 1 — moderation did not invalidate", got)
+	}
+	if got := shown()["Delta"]; got != 1 {
+		t.Errorf("after approval, Delta shown = %d, want 1 (its proposer)", got)
 	}
 
 	// 4. A merge, which moves votes between options.
