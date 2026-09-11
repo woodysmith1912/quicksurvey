@@ -16,5 +16,8 @@ e2e/.tmp/
 # Operator notes about the specific cluster this runs in (load balancer
 # address, cluster name, DNS account layout, known weaknesses of shared
 # infrastructure) stay local. The manifests are a public example; the
-# infrastructure they land on is not.
+# infrastructure they land on is not. The same directory holds
+# nonpublic-patterns.txt, the regex list .claude/hooks/scan-before-push.sh
+# checks every push against: a list of what must not be published is itself
+# something that must not be published.
 /deploy/private/
