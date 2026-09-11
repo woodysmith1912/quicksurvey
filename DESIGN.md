@@ -239,6 +239,35 @@ A respondent's vote for their own pending write-in is recorded immediately and
 starts counting the moment a moderator approves it — they do not have to come
 back.
 
+### Who was shown what
+
+An option approved halfway through a survey has been on fewer ballots than the
+rest, so its vote count and its share of respondents both under-read. The
+tally therefore also reports, per option, how many respondents were **shown**
+it and votes as a share of that.
+
+"Shown" is recorded at submission, not on page view: `seen` is a child table
+of `responses` with the same shape as `choices`, written in the same
+transaction, holding every option that was visible to that respondent. The
+visibility rule — approved options plus their own pending write-ins — has one
+definition, `visibleTo`, shared by choice filtering, carry-forward and the
+seen set. The set is unioned across a respondent's submissions and never
+shrinks, so an option removed and restored keeps its denominator.
+
+Recording on submit rather than on view was deliberate. A write per page load
+would invalidate the tally cache on every ballot view, exactly where it earns
+its keep; it would count crawlers, link unfurlers and people who looked and
+left; and it would store rows for voter identities that never respond. The
+denominator this produces is a subset of the existing respondent count, so
+the two shares are comparable, and `Votes <= Shown <= respondents` holds for
+every option.
+
+Exposures resolve through merges and count once per respondent, the same way
+votes do. Responses recorded before the table existed were backfilled once as
+having seen every option in their survey — the assumption the old share
+already made — under a `meta` key so the backfill cannot run again and mark
+later options as shown to people who answered before they existed.
+
 ## Option order
 
 Respondents see the options shuffled, by default. Position bias is real — the
