@@ -22,8 +22,16 @@ what fraction of those picked it.
 | Resubmission | The seen set is the **union** across all of a respondent's submissions. Once shown, always shown. |
 | Merges | Resolve seen options through merge pointers exactly as votes are. A respondent who saw both X and Y where X merged into Y counts once for Y. |
 | Presentation | **Keep** Share (of all respondents). **Add** Shown to (count) and Interest (% of those shown). |
-| Existing data | One-time backfill: every existing response is treated as having seen every option in its survey at migration time. |
+| Existing data | One-time backfill: every existing response is treated as having seen every approved, removed, or merged option in its survey at migration time. A pending or rejected option is backfilled as seen only by the response that voted for it, since that response can only be its proposer — nobody else could have had it on their ballot. |
 | Wide export | `1` picked, `0` shown and not picked, **blank** never shown. |
+
+The "Existing data" row was not the original decision. The original choice was
+the blunter rule above applied to every option regardless of status. A live
+upgrade test against a real 0.3.0 container showed what that cost: a write-in
+left pending across the upgrade and later approved reported shown 5 and
+interest 20% for a survey where the only person who had ever seen it was the
+one respondent who picked it — a true interest of 100%. The rule was narrowed
+to the one above as a result.
 
 ## Data model
 

@@ -276,10 +276,20 @@ the two shares are comparable, and `Votes <= Shown <= respondents` holds for
 every option.
 
 Exposures resolve through merges and count once per respondent, the same way
-votes do. Responses recorded before the table existed were backfilled once as
-having seen every option in their survey — the assumption the old share
-already made — under a `meta` key so the backfill cannot run again and mark
-later options as shown to people who answered before they existed.
+votes do. Responses recorded before the table existed were backfilled once,
+under a `meta` key so the backfill cannot run again and mark later options as
+shown to people who answered before they existed. For approved, removed, and
+merged options the backfill makes the same assumption the old share already
+did: everyone who answered saw them, since they were on the ballot (or, for a
+merged option, resolve to a target that was) whatever their status is now —
+removed is not narrowed, because an editor deleting an option later does not
+undo that it was once shown. Pending and rejected options get a narrower rule,
+because for them the truth is actually knowable: a pending write-in is
+visible only to its proposer, and a rejected one was only ever visible to its
+proposer before a moderator refused it, so the backfill marks each seen only
+by the response holding a recorded vote for it — which can only be that
+proposer. That also keeps `Votes <= Shown` intact, since a response with a
+vote for an option is always given a seen row for it too.
 
 ## Option order
 
