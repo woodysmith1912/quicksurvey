@@ -222,16 +222,23 @@ func saveResponseTx(tx *sql.Tx, surveyID, voter string, choices []string, commen
 		r.ID, surveyID, voter, r.Comment, dbTime(r.Created), dbTime(r.Updated)); err != nil {
 		return nil, err
 	}
-	for table, ids := range map[string][]string{"choices": r.Choices, "seen": r.Seen} {
-		// table is one of two compile-time constants, never caller input.
-		if _, err := tx.Exec(`DELETE FROM `+table+` WHERE response_id = ?`, r.ID); err != nil {
+	// choices can shrink between submissions, so it is deleted and reinserted.
+	// seen only ever grows: r.Seen is already the union with prev.Seen, so
+	// INSERT OR IGNORE against the primary key just no-ops the rows that were
+	// already there, with no delete needed.
+	if _, err := tx.Exec(`DELETE FROM choices WHERE response_id = ?`, r.ID); err != nil {
+		return nil, err
+	}
+	for _, id := range r.Choices {
+		if _, err := tx.Exec(
+			`INSERT INTO choices (response_id, option_id) VALUES (?, ?)`, r.ID, id); err != nil {
 			return nil, err
 		}
-		for _, id := range ids {
-			if _, err := tx.Exec(
-				`INSERT INTO `+table+` (response_id, option_id) VALUES (?, ?)`, r.ID, id); err != nil {
-				return nil, err
-			}
+	}
+	for _, id := range r.Seen {
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO seen (response_id, option_id) VALUES (?, ?)`, r.ID, id); err != nil {
+			return nil, err
 		}
 	}
 	return r.Clone(), nil
@@ -425,6 +432,36 @@ func (s *Store) attach(surveyID, table string, byID map[string]*Response, add fu
 			add(r, oid)
 		}
 	}
+}
+
+// Comments returns the responses that carry a comment, oldest first. It loads
+// no choices and no seen rows: the admin page shows the comment and its time
+// and nothing else, and the full Responses walk is what the tally cache exists
+// to avoid repeating.
+func (s *Store) Comments(surveyID string) []*Response {
+	rows, err := s.db.Query(
+		`SELECT id, voter, comment, created, updated FROM responses
+		 WHERE survey_id = ? AND comment != '' ORDER BY created, id`, surveyID)
+	if err != nil {
+		slog.Error("could not read comments", "survey", surveyID, "err", err)
+		return nil
+	}
+	defer rows.Close()
+	var out []*Response
+	for rows.Next() {
+		var r Response
+		var created, updated string
+		if err := rows.Scan(&r.ID, &r.Voter, &r.Comment, &created, &updated); err != nil {
+			slog.Error("could not read comments", "survey", surveyID, "err", err)
+			return out
+		}
+		r.Created, r.Updated = goTime(created), goTime(updated)
+		out = append(out, &r)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("could not read comments", "survey", surveyID, "err", err)
+	}
+	return out
 }
 
 // Count reports how many people have responded to a survey.
