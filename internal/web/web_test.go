@@ -1442,3 +1442,92 @@ func TestAdminCannotCreateAnAccountWithAPassword(t *testing.T) {
 		t.Error("invitation flow broke")
 	}
 }
+
+// tallyRow returns the rendered <tr> for one option, or "" if it is absent.
+func tallyRow(body, option string) string {
+	re := regexp.MustCompile(`(?s)<tr data-testid="tally-row" data-option="` + regexp.QuoteMeta(option) + `">.*?</tr>`)
+	return re.FindString(body)
+}
+
+func TestTallyShowsHowManyWereShownEachOptionAndTheirInterest(t *testing.T) {
+	h := newHarness(t)
+	sv := h.seedSurvey("Pizza")
+	path := "/s/" + sv.ID
+
+	alice, bob := h.browser(), h.browser()
+	for _, b := range []*browser{alice, bob} {
+		token := b.csrf(path)
+		b.follow(b.post(path+"/vote", url.Values{"csrf": {token}, "choice": {sv.Options[0].ID}}))
+	}
+	token := alice.csrf(path)
+	alice.follow(alice.post(path+"/writein", url.Values{"csrf": {token}, "text": {"Sushi"}}))
+
+	pw := h.seedUser("eve", store.RoleEditor)
+	editor := h.browser()
+	editor.login("eve", pw)
+	adminPath := "/admin/s/" + sv.ID
+	sv, _ = h.st.Survey(sv.ID)
+	pending := sv.PendingOptions()
+	token = editor.csrf(adminPath)
+	editor.follow(editor.post(adminPath+"/moderate", url.Values{
+		"csrf": {token}, "option": {pending[0].ID}, "action": {"approve"}, "text": {"Sushi"},
+	}))
+
+	body := editor.get(adminPath).body
+	pizza, sushi := tallyRow(body, "Pizza"), tallyRow(body, "Sushi")
+	if pizza == "" || sushi == "" {
+		t.Fatalf("tally rows missing:\n%s", body)
+	}
+	if !strings.Contains(pizza, `data-testid="shown">2<`) || !strings.Contains(pizza, `data-testid="interest">100%<`) {
+		t.Errorf("Pizza row should show shown 2 and interest 100%%:\n%s", pizza)
+	}
+	// Only Alice has been shown Sushi, so its share of respondents is 50% but
+	// its interest is 100%.
+	if !strings.Contains(sushi, `data-testid="shown">1<`) || !strings.Contains(sushi, `data-testid="interest">100%<`) {
+		t.Errorf("Sushi row should show shown 1 and interest 100%%:\n%s", sushi)
+	}
+	if !strings.Contains(sushi, ">50%<") {
+		t.Errorf("Sushi row should still show its 50%% share of all respondents:\n%s", sushi)
+	}
+}
+
+func TestTallyShowsAnUnshownOptionsInterestAsNonNumeric(t *testing.T) {
+	h := newHarness(t)
+	sv := h.seedSurvey("Pizza")
+	path := "/s/" + sv.ID
+
+	alice, bob := h.browser(), h.browser()
+	for _, b := range []*browser{alice, bob} {
+		token := b.csrf(path)
+		b.follow(b.post(path+"/vote", url.Values{"csrf": {token}, "choice": {sv.Options[0].ID}}))
+	}
+
+	// Both respondents have already submitted. An editor now adds a brand
+	// new approved option directly through the edit form, so it lands on
+	// nobody's ballot: Shown must be 0, not "0% interest".
+	pw := h.seedUser("eve", store.RoleEditor)
+	editor := h.browser()
+	editor.login("eve", pw)
+	editPath := "/admin/s/" + sv.ID + "/edit"
+	token := editor.csrf(editPath)
+	editor.follow(editor.post(editPath, url.Values{
+		"csrf":   {token},
+		"title":  {sv.Title},
+		"newopt": {"Kebab"},
+	}))
+
+	body := editor.get("/admin/s/" + sv.ID).body
+	kebab := tallyRow(body, "Kebab")
+	if kebab == "" {
+		t.Fatalf("Kebab row missing:\n%s", body)
+	}
+	if !strings.Contains(kebab, `data-testid="shown">0<`) {
+		t.Errorf("Kebab should have been shown to nobody:\n%s", kebab)
+	}
+	if strings.Contains(kebab, `data-testid="interest">0%<`) {
+		t.Errorf("Kebab's interest should not read as literal 0%%, which implies nobody wants it:\n%s", kebab)
+	}
+	if !regexp.MustCompile(`data-testid="interest">[^\d]`).MatchString(kebab) {
+		t.Errorf("Kebab's interest cell should render a non-numeric placeholder, not a percentage:\n%s", kebab)
+	}
+}

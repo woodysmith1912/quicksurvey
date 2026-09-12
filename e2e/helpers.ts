@@ -120,6 +120,15 @@ export async function tally(page: Page): Promise<Record<string, number>> {
   return out;
 }
 
+/** Reads the tally's "Shown to" column as option text to respondent count. */
+export async function shownTo(page: Page): Promise<Record<string, number>> {
+  const out: Record<string, number> = {};
+  for (const row of await page.getByTestId('tally-row').all()) {
+    out[(await row.getAttribute('data-option'))!] = Number(await row.getByTestId('shown').innerText());
+  }
+  return out;
+}
+
 function escapeRe(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

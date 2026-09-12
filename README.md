@@ -162,12 +162,21 @@ one.
 Download either TSV, then in Sheets: **File → Import → Upload**, separator type
 **Tab**.
 
-- `…-responses-*.tsv` — one row per respondent, a `1`/`0` column per option, a
-  selection count, and the comment. Pivot this.
-- `…-summary-*.tsv` — one row per option: votes, respondents, share.
+- `…-responses-*.tsv` — one row per respondent, a column per option holding
+  `1` (picked), `0` (shown and not picked) or blank (never on that person's
+  ballot, because it was added after they answered), a selection count, and
+  the comment. Pivot this. `AVERAGE` of an option's column is the share of
+  people shown it who picked it; `COUNT` is how many were shown it.
+- `…-summary-*.tsv` — one row per option: votes, respondents, share of
+  respondents, how many were shown it, and share of those.
 
 Shares are the percentage of *respondents* who picked an option. They do not add
 up to 100%, because a respondent can pick any number of options.
+
+"Shown to" is how many respondents had an option on their ballot when they
+answered. It is lower than the respondent count for an option added later —
+an approved write-in, or one an editor added — and "Interest" is votes as a
+share of that, which is the fair comparison for such options.
 
 ## Adding people
 
