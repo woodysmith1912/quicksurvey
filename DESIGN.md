@@ -117,9 +117,12 @@ with `busy_timeout` is what makes that a wait rather than an error.
 | 1 connection | 611µs | 651µs | 653µs | 16.3ms |
 | 4 connections | 272µs | 292µs | 283µs | 4.85ms |
 
-Loading a respondent's existing answer costs about 40µs — the response and its
-choices are two indexed lookups, and the number of prior respondents does not
-enter into them.
+Loading a respondent's existing answer was measured at about 40µs before the
+`seen` set existed, when the response and its choices were two indexed
+lookups and the number of prior respondents entered into neither.
+`loadResponse` now issues a third indexed lookup, for `seen`, so that cost is
+somewhat higher; it remains independent of how many other people have
+responded.
 
 Showing results to respondents used to cost 25x, because `Tally` walked every
 response on every ballot load. It is now cached, keyed on a counter that every
@@ -127,8 +130,11 @@ committed write bumps, which took that case from 4,851µs to 359µs. See below.
 
 ### At realistic scale
 
-Against a seeded database of 10,000 surveys, 99,853 options, 75,173 responses
-and 250,790 choices — 50.8MB:
+Measured before the `seen` set existed, against a seeded database of 10,000
+surveys, 99,853 options, 75,173 responses and 250,790 choices — 50.8MB. That
+fixture predates this feature and was not rebuilt for it; `seen` adds roughly
+one row per option per respondent who has submitted, several times the choice
+count, so a database seeded today would hold more rows and a larger file:
 
 | | ns/op | requests/s |
 |---|---|---|
@@ -312,9 +318,13 @@ request.
 ## The tally cache
 
 `Tally` is called on every ballot load of a survey that shows results to
-respondents. Computing it walks every response and every choice, so it grew
-linearly with the survey while nothing else did: 16ms and 2.7MB per request at
-a thousand respondents, against 0.65ms and 123KB for the same page without.
+respondents. Computing it walks every response, every choice and every seen
+row, so it grows linearly with the survey while nothing else does. Before the
+`seen` set existed, when it walked only responses and choices, that was
+measured at 16ms and 2.7MB per request at a thousand respondents, against
+0.65ms and 123KB for the same page without. A seen set runs several times the
+size of a choice set — roughly 4x the rows, in the shape this benchmark uses
+(30 options, about 10 selected) — so both figures are higher now.
 
 It is cached now, and the interesting part is the invalidation. Every write that
 can change a tally — a response, a moderation decision, a merge, publishing,
