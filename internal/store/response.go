@@ -458,7 +458,7 @@ func clearResponsesTx(tx *sql.Tx, surveyID string) (int, error) {
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM responses WHERE survey_id = ?`, surveyID).Scan(&n); err != nil {
 		return 0, err
 	}
-	// choices go too, through ON DELETE CASCADE.
+	// choices and seen go too, through ON DELETE CASCADE.
 	if _, err := tx.Exec(`DELETE FROM responses WHERE survey_id = ?`, surveyID); err != nil {
 		return 0, err
 	}
@@ -524,11 +524,14 @@ type Result struct {
 // exclusive, so percentages do not sum to 100.
 //
 // The result is cached. This is called on every ballot load of a survey that
-// shows results to respondents, and computing it walks every response and every
-// choice — 16ms and 2.7MB at a thousand respondents, growing linearly, against
-// 0.65ms for the same page without. The cache is keyed on a counter that every
-// committed write bumps, so a stale entry is never readable rather than being
-// evicted by remembering to.
+// shows results to respondents, and computing it walks every response, every
+// choice and every seen row. Before the seen set existed, walking only
+// responses and choices was measured at 16ms and 2.7MB at a thousand
+// respondents, growing linearly, against 0.65ms for the same page without; a
+// seen set runs several times the size of a choice set, so both figures are
+// higher now. The cache is keyed on a counter that every committed write
+// bumps, so a stale entry is never readable rather than being evicted by
+// remembering to.
 func (s *Store) Tally(surveyID string) (results []Result, respondents int) {
 	gen := s.gen.Load()
 
