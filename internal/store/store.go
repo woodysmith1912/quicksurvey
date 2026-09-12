@@ -76,7 +76,8 @@ const dbFile = "quicksurvey.db"
 // Four rather than more, because sixteen measured *worse* than four (328µs):
 // past the point where readers overlap, the extra connections buy nothing and
 // cost scheduling. Writes still serialise, which is correct and is what
-// _txlock=immediate and busy_timeout handle.
+// _txlock=immediate and busy_timeout handle. Both figures predate the seen
+// set; the ratios they show are not expected to have changed.
 var MaxConns = 4
 
 // Open prepares dir as a data directory, creating it and the database if
