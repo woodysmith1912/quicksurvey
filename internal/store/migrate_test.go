@@ -183,3 +183,103 @@ func TestSeenIsBackfilledOnceForResponsesFromBeforeItExisted(t *testing.T) {
 		t.Errorf("seen = %v after a second open, want the backfill to have run only once", r.Seen)
 	}
 }
+
+// TestBackfillMarksNonApprovedOptionsSeenByPreExistingResponses pins a
+// deliberate, project-owner-confirmed consequence of backfillSeen: it marks
+// EVERY option in a survey as seen by every pre-existing response, whatever
+// that option's status at the time of the upgrade, because nothing recorded
+// what those old ballots actually showed and the upgrade assumes what the old
+// share-of-respondents figure already assumed. This is not a bug to fix; it
+// is what the spec calls for.
+//
+// The consequence worth pinning: a write-in that was pending (or rejected) at
+// upgrade time gets marked seen by every pre-existing respondent, even though
+// only its proposer could ever have seen it on a real ballot. If a moderator
+// later approves it, its Shown count includes every legacy respondent, not
+// just the proposer -- inflating "shown to" and deflating "interest" for that
+// option. The Votes <= Shown invariant still holds throughout, because the
+// backfill inserts a seen row for every (response, option) pair.
+func TestBackfillMarksNonApprovedOptionsSeenByPreExistingResponses(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv := mustSurvey(t, s, "Alpha", "Bravo")
+	a := s.VoterID(sv.ID, "a")
+	if _, err := s.SaveResponse(sv.ID, a, []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	// b proposes a write-in. It is pending: visible only to b, and to nobody
+	// else, until a moderator approves it.
+	b := s.VoterID(sv.ID, "b")
+	writeIn, err := s.AddWriteIn(sv.ID, b, "Charlie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	// Turn it into what the previous release would have left behind.
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, dbFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`DROP TABLE seen`, `DELETE FROM meta WHERE key = 'seen_backfilled'`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatalf("opening a database without the seen table failed: %v", err)
+	}
+	defer s.Close()
+
+	// a never had the pending write-in on their ballot: it did not exist when
+	// a answered, and even once it did, only b's own ballot carried it. The
+	// backfill has no way to know that -- it is a blanket
+	// "everyone saw everything" -- so a is recorded as having seen it too.
+	ra, ok := s.ResponseFor(sv.ID, a)
+	if !ok {
+		t.Fatal("a's response is gone")
+	}
+	if !ra.Saw(writeIn) {
+		t.Fatalf("Saw(write-in) = false, want true: the backfill marks every option "+
+			"seen by every pre-existing response regardless of status (chosen behaviour); seen = %v", ra.Seen)
+	}
+
+	// Once a moderator approves the write-in, its Shown total reflects that
+	// inflated backfill: both a and b count, even though a could never have
+	// seen it. Votes is 1 (only b actually chose it). The invariant still
+	// holds.
+	if _, err := s.UpdateSurvey(sv.ID, func(d *Survey) error {
+		return SetOptionStatus(d, writeIn, OptApproved, "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	results, respondents := s.Tally(sv.ID)
+	if respondents != 2 {
+		t.Fatalf("respondents = %d, want 2", respondents)
+	}
+	var charlie *Result
+	for i := range results {
+		if results[i].Option.ID == writeIn {
+			charlie = &results[i]
+		}
+	}
+	if charlie == nil {
+		t.Fatal("the approved write-in is missing from the tally")
+	}
+	if charlie.Votes > charlie.Shown {
+		t.Errorf("Votes = %d, Shown = %d: the Votes <= Shown invariant must hold even here",
+			charlie.Votes, charlie.Shown)
+	}
+	if charlie.Shown != 2 {
+		t.Errorf("Shown = %d, want 2 (both pre-existing responses, chosen backfill behaviour)", charlie.Shown)
+	}
+	if charlie.Votes != 1 {
+		t.Errorf("Votes = %d, want 1 (only b actually chose it)", charlie.Votes)
+	}
+}
