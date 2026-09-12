@@ -57,6 +57,7 @@ test.describe('write-ins and moderation', () => {
 
     // Once the other person answers again with it on their ballot, it has been shown to them.
     await other.getByTestId('submit-vote').click();
+    await expect(other.getByTestId('flash')).toContainText('recorded');
     await page.goto(s.adminUrl);
     expect(await shownTo(page)).toEqual({ Bowling: 2, 'Escape room (downtown)': 2 });
 
