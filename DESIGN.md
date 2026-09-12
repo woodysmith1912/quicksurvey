@@ -108,9 +108,16 @@ connection, 272µs at four, a 2.2x difference for a one-line change.
 Four rather than more because sixteen measured *worse* than four, at 328µs. Past
 the point where readers overlap, extra connections buy nothing and cost
 scheduling. Writes still serialise, which is correct, and `_txlock=immediate`
-with `busy_timeout` is what makes that a wait rather than an error.
+with `busy_timeout` is what makes that a wait rather than an error. Both
+figures predate `seen`; see below for what that changes and what it doesn't.
 
 ### What the benchmark actually found
+
+The table below, and the `Tally` caching figures further down, were also
+measured before the `seen` set existed. The comparisons they were measured to
+show — four connections beating one, and caching keeping that cost off the
+ballot path — still hold; a heavier per-response read does not change which
+side of either ratio wins.
 
 | | fresh ballot | ~10 selected | +1,000 other respondents | + results shown |
 |---|---|---|---|---|
@@ -415,6 +422,24 @@ the same as one matching nothing, and the difference has to be audible.
 schema and opens it, and `TestEveryQueriedColumnExistsAfterMigration` runs every
 query the application issues. Both fail if a future column is added to the
 schema text and not to `addedColumns`.
+
+`backfillSeen` gives every pre-existing response a seen set exactly once,
+gated by the `seen_backfilled` meta key. That guard opens a narrow rollback
+hazard: an operator who upgrades, serves responses, and then rolls back to a
+binary that predates `seen` gets no seen rows for anything recorded on that
+older binary, since it never writes to the table at all. Rolling forward
+again does not repair the gap — the guard key is already set, so
+`backfillSeen` will not run a second time. Those responses keep their votes
+but carry no recorded exposure, which understates the Interest figure for the
+options involved, silently.
+
+The obvious fix, backfilling any response with no seen rows, is wrong: a
+respondent can genuinely submit with nothing visible to them, and treating
+that as a missed backfill would relabel a real zero as "saw everything" — the
+same corruption the guard exists to prevent. In practice the window only
+opens if someone deliberately downgrades and keeps serving: this is a
+single-replica, self-hosted application, and nothing about an ordinary
+upgrade would open it on its own.
 
 ## Invitations and approval
 
