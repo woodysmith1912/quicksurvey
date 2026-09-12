@@ -241,3 +241,28 @@ func TestRemovingAndRestoringAnOptionKeepsItsShownCount(t *testing.T) {
 	}
 	checkTallyInvariant(t, s, sv.ID)
 }
+
+func TestCommentsReturnsOnlyResponsesWithACommentOldestFirst(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Alpha", "Bravo")
+	alpha := sv.Options[0].ID
+	// No comment.
+	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "silent"), []string{alpha}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "first"), []string{alpha}, "first comment"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "second"), []string{alpha}, "second comment"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := s.Comments(sv.ID)
+	if len(got) != 2 {
+		t.Fatalf("Comments = %d responses, want 2 (the silent one excluded)", len(got))
+	}
+	if got[0].Comment != "first comment" || got[1].Comment != "second comment" {
+		t.Errorf("Comments = %q, %q, want oldest first: %q, %q",
+			got[0].Comment, got[1].Comment, "first comment", "second comment")
+	}
+}
