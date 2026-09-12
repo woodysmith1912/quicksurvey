@@ -124,10 +124,13 @@ func TestEveryQueriedColumnExistsAfterMigration(t *testing.T) {
 }
 
 // Responses recorded before the seen table existed carry no record of what
-// was on their ballot. The upgrade treats them as having seen every option
-// in their survey — the assumption the old share-of-respondents figure already
-// made — and does so exactly once, so options added later are not
-// retroactively marked as shown to people who answered before they existed.
+// was on their ballot. For an approved option — both of this survey's options
+// are — the upgrade treats every pre-existing response as having seen it,
+// since it was on the ballot for everyone who answered. (Pending and rejected
+// write-ins are narrower; see
+// TestBackfillMarksPendingAndRejectedOptionsSeenOnlyByTheirProposer.) The
+// backfill runs exactly once, so options added later are not retroactively
+// marked as shown to people who answered before they existed.
 func TestSeenIsBackfilledOnceForResponsesFromBeforeItExisted(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)
@@ -184,22 +187,23 @@ func TestSeenIsBackfilledOnceForResponsesFromBeforeItExisted(t *testing.T) {
 	}
 }
 
-// TestBackfillMarksNonApprovedOptionsSeenByPreExistingResponses pins a
-// deliberate, project-owner-confirmed consequence of backfillSeen: it marks
-// EVERY option in a survey as seen by every pre-existing response, whatever
-// that option's status at the time of the upgrade, because nothing recorded
-// what those old ballots actually showed and the upgrade assumes what the old
-// share-of-respondents figure already assumed. This is not a bug to fix; it
-// is what the spec calls for.
+// TestBackfillMarksPendingAndRejectedOptionsSeenOnlyByTheirProposer pins the
+// current, project-owner-confirmed behaviour of backfillSeen: an option that
+// was pending or rejected at the moment of the upgrade is backfilled as seen
+// only by the response that actually voted for it — which can only be its
+// proposer, since a pending write-in is visible only to the person who
+// proposed it and a rejected one was only ever visible to its proposer before
+// a moderator refused it. A live upgrade test against a real 0.3.0 container
+// showed what the old blanket rule cost here: a write-in left pending across
+// the upgrade and approved afterwards reported shown 5 and interest 20% for a
+// single voter who had, in truth, seen and picked it — interest 100%.
 //
-// The consequence worth pinning: a write-in that was pending (or rejected) at
-// upgrade time gets marked seen by every pre-existing respondent, even though
-// only its proposer could ever have seen it on a real ballot. If a moderator
-// later approves it, its Shown count includes every legacy respondent, not
-// just the proposer -- inflating "shown to" and deflating "interest" for that
-// option. The Votes <= Shown invariant still holds throughout, because the
-// backfill inserts a seen row for every (response, option) pair.
-func TestBackfillMarksNonApprovedOptionsSeenByPreExistingResponses(t *testing.T) {
+// Every other status keeps the old "everyone who answered saw it" rule,
+// including OptRemoved: it was on the ballot until an editor deleted it, so
+// everyone who answered really did see it, and this test also pins that a
+// careless narrowing must not sweep removed options in with pending and
+// rejected ones.
+func TestBackfillMarksPendingAndRejectedOptionsSeenOnlyByTheirProposer(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir)
 	if err != nil {
@@ -210,11 +214,32 @@ func TestBackfillMarksNonApprovedOptionsSeenByPreExistingResponses(t *testing.T)
 	if _, err := s.SaveResponse(sv.ID, a, []string{sv.Options[0].ID}, ""); err != nil {
 		t.Fatal(err)
 	}
-	// b proposes a write-in. It is pending: visible only to b, and to nobody
-	// else, until a moderator approves it.
+	c := s.VoterID(sv.ID, "c")
+	if _, err := s.SaveResponse(sv.ID, c, []string{sv.Options[1].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// b proposes Charlie; it is still pending when the upgrade runs.
 	b := s.VoterID(sv.ID, "b")
-	writeIn, err := s.AddWriteIn(sv.ID, b, "Charlie")
+	charlie, err := s.AddWriteIn(sv.ID, b, "Charlie")
 	if err != nil {
+		t.Fatal(err)
+	}
+	// d proposes Delta; a moderator rejects it before the upgrade runs.
+	d := s.VoterID(sv.ID, "d")
+	delta, err := s.AddWriteIn(sv.ID, d, "Delta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateSurvey(sv.ID, func(sur *Survey) error {
+		return SetOptionStatus(sur, delta, OptRejected, "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// An editor removes Bravo after c has already voted for it.
+	if _, err := s.UpdateSurvey(sv.ID, func(sur *Survey) error {
+		return SetOptionStatus(sur, sv.Options[1].ID, OptRemoved, "")
+	}); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -237,49 +262,56 @@ func TestBackfillMarksNonApprovedOptionsSeenByPreExistingResponses(t *testing.T)
 	}
 	defer s.Close()
 
-	// a never had the pending write-in on their ballot: it did not exist when
-	// a answered, and even once it did, only b's own ballot carried it. The
-	// backfill has no way to know that -- it is a blanket
-	// "everyone saw everything" -- so a is recorded as having seen it too.
-	ra, ok := s.ResponseFor(sv.ID, a)
-	if !ok {
-		t.Fatal("a's response is gone")
+	// Alpha (approved) and Bravo (removed) were on the ballot for everyone who
+	// answered, whatever their status is now, so every pre-existing response
+	// is backfilled as having seen both. Charlie and Delta, still pending and
+	// rejected respectively, are backfilled as seen only by the response that
+	// actually voted for them: their own proposer.
+	for _, voter := range []string{a, b, c, d} {
+		got := seenByText(t, s, sv.ID, voter)
+		if !got["Alpha"] || !got["Bravo"] {
+			t.Errorf("%s: seen = %v, want Alpha and Bravo (approved / removed are seen by everyone)", voter, got)
+		}
+		if got["Charlie"] != (voter == b) {
+			t.Errorf("%s: seen[Charlie] = %v, want true only for its proposer b", voter, got["Charlie"])
+		}
+		if got["Delta"] != (voter == d) {
+			t.Errorf("%s: seen[Delta] = %v, want true only for its proposer d", voter, got["Delta"])
+		}
 	}
-	if !ra.Saw(writeIn) {
-		t.Fatalf("Saw(write-in) = false, want true: the backfill marks every option "+
-			"seen by every pre-existing response regardless of status (chosen behaviour); seen = %v", ra.Seen)
-	}
+	checkTallyInvariant(t, s, sv.ID)
 
-	// Once a moderator approves the write-in, its Shown total reflects that
-	// inflated backfill: both a and b count, even though a could never have
-	// seen it. Votes is 1 (only b actually chose it). The invariant still
-	// holds.
-	if _, err := s.UpdateSurvey(sv.ID, func(d *Survey) error {
-		return SetOptionStatus(d, writeIn, OptApproved, "")
+	// A moderator approves both write-ins. Shown must reflect only the one
+	// respondent who could really have seen each of them — not every
+	// pre-existing respondent — so interest comes out as 100%, not diluted by
+	// respondents who never had it on their ballot.
+	if _, err := s.UpdateSurvey(sv.ID, func(sur *Survey) error {
+		if err := SetOptionStatus(sur, charlie, OptApproved, ""); err != nil {
+			return err
+		}
+		return SetOptionStatus(sur, delta, OptApproved, "")
 	}); err != nil {
 		t.Fatal(err)
 	}
+
+	shown := shownByText(t, s, sv.ID)
 	results, respondents := s.Tally(sv.ID)
-	if respondents != 2 {
-		t.Fatalf("respondents = %d, want 2", respondents)
+	if respondents != 4 {
+		t.Fatalf("respondents = %d, want 4", respondents)
 	}
-	var charlie *Result
-	for i := range results {
-		if results[i].Option.ID == writeIn {
-			charlie = &results[i]
+	byText := map[string]Result{}
+	for _, r := range results {
+		byText[r.Option.Text] = r
+	}
+	for _, text := range []string{"Charlie", "Delta"} {
+		r := byText[text]
+		if r.Votes != 1 || r.Shown != 1 || r.ShownPercent != 100 {
+			t.Errorf("%s = %+v, want votes 1, shown 1, interest (ShownPercent) 100 — "+
+				"not votes 1 against shown %d", text, r, respondents)
+		}
+		if shown[text] != 1 {
+			t.Errorf("shownByText[%s] = %d, want 1", text, shown[text])
 		}
 	}
-	if charlie == nil {
-		t.Fatal("the approved write-in is missing from the tally")
-	}
-	if charlie.Votes > charlie.Shown {
-		t.Errorf("Votes = %d, Shown = %d: the Votes <= Shown invariant must hold even here",
-			charlie.Votes, charlie.Shown)
-	}
-	if charlie.Shown != 2 {
-		t.Errorf("Shown = %d, want 2 (both pre-existing responses, chosen backfill behaviour)", charlie.Shown)
-	}
-	if charlie.Votes != 1 {
-		t.Errorf("Votes = %d, want 1 (only b actually chose it)", charlie.Votes)
-	}
+	checkTallyInvariant(t, s, sv.ID)
 }
