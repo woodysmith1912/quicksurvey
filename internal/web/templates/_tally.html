@@ -4,7 +4,7 @@
   An option added after some people had already answered was shown to fewer of them;
   "Interest" is the share of those who saw it.</p>
 <table data-testid="tally">
-  <thead><tr><th>Option</th><th class="num">Votes</th><th class="num">Share</th><th class="num">Shown to</th><th class="num">Interest</th><th></th></tr></thead>
+  <thead><tr><th>Option</th><th class="num">Votes</th><th class="num">Share</th><th class="num">Shown to</th><th class="num">Interest</th><th class="barcol"></th></tr></thead>
   <tbody>
   {{range .Results}}
     <tr data-testid="tally-row" data-option="{{.Option.Text}}">
@@ -12,8 +12,8 @@
       <td class="num" data-testid="votes">{{.Votes}}</td>
       <td class="num">{{pct .Percent}}</td>
       <td class="num" data-testid="shown">{{.Shown}}</td>
-      <td class="num" data-testid="interest">{{pct .ShownPercent}}</td>
-      <td><progress class="bar" value="{{.Votes}}" max="{{if $.Voters}}{{$.Voters}}{{else}}1{{end}}"></progress></td>
+      <td class="num" data-testid="interest">{{if .Shown}}{{pct .ShownPercent}}{{else}}&mdash;{{end}}</td>
+      <td class="barcol"><progress class="bar" value="{{.Votes}}" max="{{if $.Voters}}{{$.Voters}}{{else}}1{{end}}"></progress></td>
     </tr>
   {{else}}
     <tr><td colspan="6" class="muted">No options to show yet.</td></tr>
