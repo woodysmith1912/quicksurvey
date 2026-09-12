@@ -77,12 +77,38 @@ func header(o store.Option) string {
 	return textCell(fmt.Sprintf("%s [%s]", o.Text, o.Status))
 }
 
-// Responses writes the wide, one-row-per-response table: a column per option
-// holding 1 (picked), 0 (shown, not picked) or blank (never on that person's ballot), plus the comment.
-// This is the shape you pivot in Sheets.
+// resolvedSets resolves every choice and every seen ID through merge pointers
+// once, so the column loop can look each up in O(1) instead of rescanning
+// r.Choices and r.Seen per column. Built per response, before the column loop.
 //
-// Merged options are omitted as columns because their votes already appear
-// under the option they were merged into.
+// A cyclic merge chain cannot cause a bogus attribution here: sv.Resolve gives
+// up after a bounded walk and returns an ID whose option is still merged, and
+// merged options never become columns (see the loop that builds cols below),
+// so such a value matches nothing.
+func resolvedSets(sv *store.Survey, r *store.Response) (chosen, seen map[string]bool) {
+	chosen, seen = make(map[string]bool, len(r.Choices)), make(map[string]bool, len(r.Seen))
+	for _, id := range r.Choices {
+		resolved, _ := sv.Resolve(id)
+		chosen[resolved] = true
+	}
+	for _, id := range r.Seen {
+		resolved, _ := sv.Resolve(id)
+		seen[resolved] = true
+	}
+	return chosen, seen
+}
+
+// Responses writes the wide, one-row-per-response table: a column per option
+// holding 1 (picked), 0 (shown, not picked) or blank (never on that person's
+// ballot), plus a selection count and the comment. This is the shape you
+// pivot in Sheets.
+//
+// Merged options are omitted as columns; a choice or a seen entry that points
+// at one is resolved to the option it was merged into before being matched
+// against a column, so a respondent whose only pick was later merged away
+// still shows 1 under the option it became. selections counts each resolved
+// column at most once, so two duplicates picked and merged into the same
+// option count as one selection — matching how Summary tallies votes.
 func Responses(w io.Writer, sv *store.Survey, responses []*store.Response, loc *time.Location) error {
 	bw := bufio.NewWriter(w)
 
@@ -104,12 +130,13 @@ func Responses(w io.Writer, sv *store.Survey, responses []*store.Response, loc *
 
 	for _, r := range responses {
 		rec := []string{r.ID, r.Created.In(loc).Format(time.RFC3339), r.Updated.In(loc).Format(time.RFC3339)}
+		chosen, seen := resolvedSets(sv, r)
 		n := 0
 		for _, o := range cols {
 			switch {
-			case r.Chose(o.ID):
+			case chosen[o.ID]:
 				rec, n = append(rec, "1"), n+1
-			case r.Saw(o.ID):
+			case seen[o.ID]:
 				rec = append(rec, "0")
 			default:
 				// Never on this person's ballot. Blank rather than 0, so a
