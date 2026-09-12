@@ -279,11 +279,27 @@ func (s *Store) migrate() error {
 }
 
 // backfillSeen gives responses recorded before the seen table existed a seen
-// set, once. Nothing recorded what was on those ballots, so the assumption is
-// the one the share-of-respondents figure already made: everyone saw
-// everything. Guarded by a meta key rather than by the table being empty, so
-// options added after the upgrade are never marked as shown to people who
-// answered before they existed.
+// set, once. Nothing recorded what was on those ballots, so for most statuses
+// the assumption is the one the share-of-respondents figure already made:
+// everyone who answered saw everything on the ballot. That holds for
+// OptApproved (it was on the ballot), OptRemoved (it was on the ballot until
+// an editor deleted it — everyone who answered still saw it, and narrowing
+// this one would lose real exposures), and OptMerged (exposure resolves
+// through the merge pointer to the target, which everyone saw anyway, and the
+// tally dedupes per respondent so a duplicate exposure is harmless).
+//
+// OptPending and OptRejected are different: a pending write-in is visible
+// only to the respondent who proposed it, and a rejected one was only ever
+// visible to its proposer before a moderator refused it. Unlike the other
+// statuses, the truth here is actually knowable — only the proposer could
+// have a vote recorded for it — so instead of guessing "everyone," those two
+// are backfilled as seen only by the response holding a vote for them. That
+// also keeps the invariant Votes <= Shown intact: any response with a
+// recorded vote for an option is guaranteed a seen row for it too, so no
+// option can come out of the backfill with more votes than exposures.
+// Guarded by a meta key rather than by the table being empty, so options
+// added after the upgrade are never marked as shown to people who answered
+// before they existed.
 func (s *Store) backfillSeen() error {
 	return s.tx(func(tx *sql.Tx) error {
 		var done int
@@ -293,9 +309,16 @@ func (s *Store) backfillSeen() error {
 		if done > 0 {
 			return nil
 		}
+		// OptPending and OptRejected are excluded from the blanket "everyone
+		// saw it" rule below (see the doc comment); the EXISTS clause instead
+		// marks them seen only by whichever response actually voted for them.
 		res, err := tx.Exec(
 			`INSERT OR IGNORE INTO seen (response_id, option_id)
-			 SELECT r.id, o.id FROM responses r JOIN options o ON o.survey_id = r.survey_id`)
+			 SELECT r.id, o.id FROM responses r JOIN options o ON o.survey_id = r.survey_id
+			 WHERE o.status NOT IN (?, ?)
+			    OR EXISTS (SELECT 1 FROM choices c
+			               WHERE c.response_id = r.id AND c.option_id = o.id)`,
+			OptPending, OptRejected)
 		if err != nil {
 			return err
 		}
