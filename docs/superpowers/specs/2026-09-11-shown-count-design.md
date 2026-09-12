@@ -54,8 +54,17 @@ Run once, inside `migrate()`, guarded by a `meta` key (`seen_backfilled`):
 
 ```sql
 INSERT OR IGNORE INTO seen (response_id, option_id)
-SELECT r.id, o.id FROM responses r JOIN options o ON o.survey_id = r.survey_id;
+SELECT r.id, o.id FROM responses r JOIN options o ON o.survey_id = r.survey_id
+WHERE o.status NOT IN (?, ?)  -- OptPending, OptRejected
+   OR EXISTS (SELECT 1 FROM choices c
+              WHERE c.response_id = r.id AND c.option_id = o.id);
 ```
+
+Approved, removed, and merged options are backfilled as seen by every
+pre-existing response, as before. Pending and rejected are excluded from that
+blanket insert; the `EXISTS` clause instead gives each of those a seen row
+only for the response that actually voted for it, which can only be its
+proposer.
 
 Idempotent by construction (`OR IGNORE`), and the key stops it re-running so
 options added after the upgrade are not retroactively marked seen by old
@@ -101,8 +110,9 @@ any submit bumps the generation as before.
 
 Invariant: for every option, `Votes <= Shown <= respondents`. A respondent can
 only choose what was on their ballot, and every seen row belongs to a
-respondent. The backfill preserves this because it inserts a row for every
-(response, option) pair.
+respondent. The backfill preserves this because its `EXISTS` clause means any
+response carrying a vote for an option is unconditionally also given a seen
+row for it, whatever that option's status.
 
 ## Presentation
 
