@@ -112,6 +112,27 @@ type DocumentResponse struct {
 	Updated time.Time `json:"updated"`
 }
 
+// checkDocHeader rejects a document this build should not act on: one that is
+// not ours, and one newer than we understand -- which would otherwise be
+// restored with whatever fields this build happens to know, quietly returning
+// something other than what was saved. A version at or below zero is refused
+// for the same reason: a document that declares nothing would otherwise be
+// treated as current.
+func checkDocHeader(format string, version int) error {
+	if format != docFormat {
+		return fmt.Errorf("not a quicksurvey survey document (format %q, want %q)",
+			format, docFormat)
+	}
+	if version < 1 {
+		return fmt.Errorf("document declares no version")
+	}
+	if version > docVersion {
+		return fmt.Errorf("document is version %d; this quicksurvey understands up to %d",
+			version, docVersion)
+	}
+	return nil
+}
+
 // SurveyDocument returns a survey's definition, or with responses a full
 // backup of it.
 //
@@ -207,15 +228,8 @@ func (s *Store) RestoreSurvey(doc *Document, keepID bool) (*Survey, error) {
 	if doc == nil {
 		return nil, fmt.Errorf("no document")
 	}
-	if doc.Format != docFormat {
-		return nil, fmt.Errorf("not a quicksurvey survey document (format %q, want %q)",
-			doc.Format, docFormat)
-	}
-	// A newer document may carry fields this build would drop, which is how a
-	// "restore" quietly returns something other than what was saved.
-	if doc.Version > docVersion {
-		return nil, fmt.Errorf("document is version %d; this quicksurvey understands up to %d",
-			doc.Version, docVersion)
+	if err := checkDocHeader(doc.Format, doc.Version); err != nil {
+		return nil, err
 	}
 	title := strings.TrimSpace(doc.Survey.Title)
 	if title == "" {
@@ -281,21 +295,14 @@ func (s *Store) RestoreSurvey(doc *Document, keepID bool) (*Survey, error) {
 		}
 	}
 
-	// A restored survey has to respect the same ceiling a live one does.
-	// Without this a document can carry a survey past the point where
-	// AddOption refuses, after which write-ins are permanently rejected, and
-	// the real limit becomes an incidental SQLite bind-variable count.
-	if n := len(doc.Survey.Options); n > maxOptions {
-		return nil, fmt.Errorf("document has %d options; the maximum is %d", n, maxOptions)
-	}
-
 	// optionID maps what the document called an option to what it is called
 	// once restored, so stored choices still point at the right thing.
 	optionID := map[string]string{}
-	for _, o := range doc.Survey.Options {
+	for i, o := range doc.Survey.Options {
 		text := strings.TrimSpace(o.Text)
 		if text == "" {
-			continue
+			return nil, fmt.Errorf("option %d has no text; a document cannot be restored "+
+				"in part, because every response that names that option would be wrong", i+1)
 		}
 		source := o.Source
 		if source != "writein" {
@@ -338,7 +345,7 @@ func (s *Store) RestoreSurvey(doc *Document, keepID bool) (*Survey, error) {
 		}
 	}
 
-	responses, err := restorableResponses(doc, optionID, sv.Options)
+	responses, err := restorableResponses(doc, optionID)
 	if err != nil {
 		return nil, err
 	}
@@ -357,17 +364,7 @@ func (s *Store) RestoreSurvey(doc *Document, keepID bool) (*Survey, error) {
 // restorableResponses converts the document's responses, remapping option IDs
 // and refusing any choice that names an option the document does not contain.
 // A dangling choice would silently drop a vote.
-func restorableResponses(doc *Document, optionID map[string]string, opts []Option) ([]*Response, error) {
-	// order is every restored option id in survey order; blanketSeen is the
-	// subset backfillSeen would mark as shown to everyone.
-	order := make([]string, 0, len(opts))
-	var blanketSeen []string
-	for _, o := range opts {
-		order = append(order, o.ID)
-		if o.Status != OptPending && o.Status != OptRejected {
-			blanketSeen = append(blanketSeen, o.ID)
-		}
-	}
+func restorableResponses(doc *Document, optionID map[string]string) ([]*Response, error) {
 	var out []*Response
 	for i, dr := range doc.Responses {
 		if dr.Voter == "" {
@@ -388,41 +385,41 @@ func restorableResponses(doc *Document, optionID map[string]string, opts []Optio
 			}
 			r.Choices = append(r.Choices, to)
 		}
-		// Unlike a choice, an unmappable seen entry is not an error. A choice
-		// that names nothing is a lost ballot; an exposure that names nothing
-		// is a lost denominator. Failing the whole restore over one -- and a
-		// seen set names most of the option list, so a single option the
-		// sanitiser drops would name nearly every response -- is the wrong
-		// trade on a recovery path.
-		seen := map[string]bool{}
+		// Every option in the document maps, because a document with an
+		// unrestorable option was refused above -- so an unresolvable seen
+		// entry means the same thing an unresolvable choice does.
+		held := make(map[string]bool, len(dr.Seen)+len(r.Choices))
 		for _, sn := range dr.Seen {
-			if to, ok := optionID[sn]; ok {
-				seen[to] = true
+			to, ok := optionID[sn]
+			if !ok {
+				return nil, fmt.Errorf("response %d was shown option %q, which the document does not contain",
+					i+1, sn)
+			}
+			if !held[to] {
+				held[to] = true
+				r.Seen = append(r.Seen, to)
 			}
 		}
-		// A document written before seen existed carries none at all. Guess
-		// the same way backfillSeen guesses for a database upgraded in place,
-		// so the two routes out of a pre-seen world agree: every option that
-		// was on the ballot for everyone, which is all of them except pending
-		// and rejected write-ins. Guessing "only what they picked" instead
-		// would report Shown == Votes and Interest 100% for every option,
-		// which is not a weaker claim but a confidently wrong one.
-		if len(dr.Seen) == 0 {
-			for _, id := range blanketSeen {
-				seen[id] = true
-			}
-		}
-		// Whatever the source, every option this respondent chose was on their
-		// ballot by definition. Unconditional, so a document carrying a
-		// partial seen set cannot restore a survey with more votes than
-		// exposures.
+		// Every option this respondent chose was on their ballot by
+		// definition. Unconditional, so a document carrying a partial seen
+		// set -- or none at all, as one written before seen existed does --
+		// cannot restore a survey reporting more votes than exposures.
+		//
+		// That is the whole of the guess. An earlier version also marked
+		// every non-pending option as seen by everyone, mirroring what
+		// backfillSeen does for a database upgraded in place. It was wrong
+		// twice over: it could not tell a document that predates seen from
+		// one recording a respondent who genuinely saw nothing, so it
+		// corrupted faithful backups; and it materialised options x responses
+		// strings from an upload that pays for neither, which made a 250KB
+		// file enough to exhaust the container. Restoring a pre-seen backup
+		// therefore reports optimistic interest -- Shown == Votes for every
+		// option -- where an in-place upgrade reports the truth. That
+		// difference is written down in DESIGN.md rather than guessed away.
 		for _, c := range r.Choices {
-			seen[c] = true
-		}
-		// Survey order, so the stored list is deterministic.
-		for _, o := range order {
-			if seen[o] {
-				r.Seen = append(r.Seen, o)
+			if !held[c] {
+				held[c] = true
+				r.Seen = append(r.Seen, c)
 			}
 		}
 		out = append(out, r)
@@ -496,13 +493,8 @@ func (s *Store) ReadSurveyDocument(r io.Reader, keepID bool) (*Survey, error) {
 	if err := json.Unmarshal(body, &head); err != nil {
 		return nil, fmt.Errorf("reading survey document: %w", err)
 	}
-	if head.Format != docFormat {
-		return nil, fmt.Errorf("not a quicksurvey survey document (format %q, want %q)",
-			head.Format, docFormat)
-	}
-	if head.Version > docVersion {
-		return nil, fmt.Errorf("document is version %d; this quicksurvey understands up to %d",
-			head.Version, docVersion)
+	if err := checkDocHeader(head.Format, head.Version); err != nil {
+		return nil, err
 	}
 
 	var doc Document

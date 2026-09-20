@@ -335,6 +335,13 @@ func (s *Store) backfillSeen() error {
 	var total int64
 	for _, id := range ids {
 		n, err := s.backfillSeenForSurvey(id)
+		if errors.Is(err, errBackfillDone) {
+			// Another process got there first. Stop rather than opening a
+			// write transaction per remaining survey to rediscover it, and
+			// leave its completion marker alone -- that timestamp records
+			// when the work actually finished, and this process did none.
+			return nil
+		}
 		if err != nil {
 			return fmt.Errorf("backfilling seen for survey %q: %w", id, err)
 		}
@@ -379,6 +386,11 @@ func (s *Store) surveyIDsAfter(through string) ([]string, error) {
 
 // backfillSeenForSurvey does one survey and records that it is done, in one
 // transaction, so the marker can never claim more than was committed.
+// errBackfillDone says another process finished the backfill while this one
+// was working. It is not a failure, and it is not a per-survey condition:
+// there is nothing left for this process to do at all.
+var errBackfillDone = errors.New("backfill already completed by another process")
+
 func (s *Store) backfillSeenForSurvey(surveyID string) (int64, error) {
 	var n int64
 	err := s.tx(func(tx *sql.Tx) error {
@@ -397,7 +409,7 @@ func (s *Store) backfillSeenForSurvey(surveyID string) (int64, error) {
 			return err
 		}
 		if done > 0 {
-			return nil
+			return errBackfillDone
 		}
 		// OptPending and OptRejected are excluded from the blanket "everyone
 		// saw it" rule below (see the doc comment); the EXISTS clause instead

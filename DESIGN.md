@@ -463,6 +463,24 @@ upgrade would open it on its own.
 
 ## Invitations and approval
 
+Restoring a backup written before `seen` existed has the same gap, arrived at
+differently, and it is worth being explicit that the two routes disagree. The
+restore seeds the seen set from each response's choices and nothing else,
+because that is the only exposure the document actually records. An in-place
+upgrade is more generous: it marks every option that was on the ballot as seen
+by everyone who answered. So the same pre-`seen` data reports honest Interest
+if the database was upgraded and optimistic Interest if it was restored, and
+nothing afterwards can tell which happened.
+
+Copying the backfill's rule into the restore was tried and reverted. It cannot
+distinguish a document that predates `seen` from one faithfully recording a
+respondent who saw nothing — the wire format has no way to say "empty" as
+distinct from "absent" — so it corrupted good backups to improve stale ones.
+It also built an exposure list per response for options the upload never
+mentioned, which turned a small file into enough allocation to exhaust the
+container. Guessing less is the better trade: the restore claims only what the
+document says, and this paragraph is the record of what that costs.
+
 Adding an administrator has two halves, deliberately, so neither one alone is
 enough. An existing admin mints a **single-use link**; the person who follows it
 chooses their own username and password; and then an admin approves the account
