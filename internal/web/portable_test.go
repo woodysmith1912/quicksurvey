@@ -238,3 +238,42 @@ func TestUnknownSaveKindIsNotFound(t *testing.T) {
 		t.Errorf("unknown save kind = %d, want 404", r.status)
 	}
 }
+
+// Shown and Interest are cohort sizes. A cohort of one — which happens
+// routinely the moment an editor approves a write-in — states a single
+// respondent's ballot entry as a percentage, so an anonymous reader of the
+// public results page must not see those columns. A signed-in account is a
+// permissioned reader and does.
+func TestExposureColumnsAreHiddenFromAnonymousReaders(t *testing.T) {
+	h := newHarness(t)
+	sv := h.seedSurvey("Tacos", "Ramen")
+	if _, err := h.st.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		d.ShowResults = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.SaveResponse(sv.ID, h.st.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	anon := h.browser()
+	for _, path := range []string{"/s/" + sv.ID + "/results", "/s/" + sv.ID} {
+		body := anon.get(path).body
+		if !strings.Contains(body, `data-testid="tally"`) {
+			t.Fatalf("%s: no tally rendered at all; the test is not exercising the page", path)
+		}
+		if strings.Contains(body, `data-testid="shown"`) || strings.Contains(body, `data-testid="interest"`) {
+			t.Errorf("%s: an anonymous reader can see the exposure columns", path)
+		}
+		if strings.Contains(body, "Shown to") || strings.Contains(body, "Interest") {
+			t.Errorf("%s: the exposure headings leak to an anonymous reader", path)
+		}
+	}
+
+	ed := h.editor()
+	body := ed.get("/admin/s/" + sv.ID).body
+	if !strings.Contains(body, `data-testid="shown"`) || !strings.Contains(body, `data-testid="interest"`) {
+		t.Error("a signed-in account should still see the exposure columns")
+	}
+}

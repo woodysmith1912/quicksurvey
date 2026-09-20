@@ -368,7 +368,7 @@ func (s *Server) handleRestoreSurvey(w http.ResponseWriter, r *http.Request) {
 		fail(err.Error())
 		return
 	}
-	responses := len(s.store.Responses(sv.ID))
+	responses := s.store.Count(sv.ID)
 	s.cfg.Logger.Info("survey restored", "survey", sv.ID, "from", hdr.Filename,
 		"kept_id", keepID, "responses", responses, "by", me.Name)
 
