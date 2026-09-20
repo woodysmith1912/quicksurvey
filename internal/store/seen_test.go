@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 // seenByText returns the option texts a respondent has been shown, which is
 // what a reader of these tests wants to assert on.
@@ -42,7 +45,7 @@ func TestSubmittingRecordsTheApprovedOptionsAsSeen(t *testing.T) {
 		t.Errorf("seen = %v, want Alpha and Bravo but not the removed Charlie", got)
 	}
 	r, _ := s.ResponseFor(sv.ID, v)
-	if !r.Saw(sv.Options[1].ID) || r.Saw(sv.Options[2].ID) {
+	if !slices.Contains(r.Seen, sv.Options[1].ID) || slices.Contains(r.Seen, sv.Options[2].ID) {
 		t.Error("Saw disagrees with Seen")
 	}
 
@@ -107,7 +110,7 @@ func TestSeenGrowsAcrossSubmissionsAndNeverShrinks(t *testing.T) {
 	// A choice is always a subset of what was seen.
 	for _, r := range s.Responses(sv.ID) {
 		for _, id := range r.Choices {
-			if !r.Saw(id) {
+			if !slices.Contains(r.Seen, id) {
 				t.Errorf("response %s chose %s without having seen it", r.ID, id)
 			}
 		}

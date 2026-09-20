@@ -55,16 +55,6 @@ func (r *Response) Chose(id string) bool {
 	return false
 }
 
-// Saw reports whether the given option has ever been on this respondent's ballot.
-func (r *Response) Saw(id string) bool {
-	for _, s := range r.Seen {
-		if s == id {
-			return true
-		}
-	}
-	return false
-}
-
 // VoterID derives the stored identifier for a respondent of one survey from the
 // random token in their cookie.
 //
@@ -143,7 +133,7 @@ func saveResponseTx(tx *sql.Tx, surveyID, voter string, choices []string, commen
 		return nil, fmt.Errorf("survey is not accepting responses")
 	}
 
-	prev, err := loadResponse(tx, surveyID, voter)
+	prev, err := loadResponse(tx, surveyID, voter, true)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
@@ -239,9 +229,13 @@ func saveResponseTx(tx *sql.Tx, surveyID, voter string, choices []string, commen
 			return nil, err
 		}
 	}
-	for _, id := range r.Seen {
-		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO seen (response_id, option_id) VALUES (?, ?)`, r.ID, id); err != nil {
+	// Because the set only grows, an unchanged length means an unchanged set,
+	// and there is nothing to write. That is the common case: a respondent
+	// changing their mind has seen exactly what they saw before. Without this
+	// every resubmission re-issued one statement per option -- on a large
+	// survey, hundreds of no-op writes inside the single write lock.
+	if prev == nil || len(r.Seen) != len(prev.Seen) {
+		if err := insertSeen(tx, r.ID, r.Seen); err != nil {
 			return nil, err
 		}
 	}
@@ -267,7 +261,29 @@ func loadIDs(q queryer, query string, args ...any) ([]string, error) {
 	return out, rows.Err()
 }
 
-func loadResponse(q queryer, surveyID, voter string) (*Response, error) {
+// loadResponse reads one respondent's answer. withSeen controls whether the
+// seen set comes with it: it is roughly as long as the survey's option list,
+// several times the choices, and the ballot page -- the hottest read in the
+// application -- does not look at it.
+// insertSeen adds the response's seen rows in one statement. INSERT OR IGNORE
+// against the primary key makes rows that are already there a no-op, which is
+// what lets the whole set be written without first deleting it.
+func insertSeen(tx *sql.Tx, responseID string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(ids))
+	args := make([]any, 0, len(ids)*2)
+	for _, id := range ids {
+		values = append(values, "(?, ?)")
+		args = append(args, responseID, id)
+	}
+	_, err := tx.Exec(
+		`INSERT OR IGNORE INTO seen (response_id, option_id) VALUES `+strings.Join(values, ", "), args...)
+	return err
+}
+
+func loadResponse(q queryer, surveyID, voter string, withSeen bool) (*Response, error) {
 	var r Response
 	var created, updated string
 	err := q.QueryRow(
@@ -280,8 +296,10 @@ func loadResponse(q queryer, surveyID, voter string) (*Response, error) {
 	if r.Choices, err = loadIDs(q, `SELECT option_id FROM choices WHERE response_id = ?`, r.ID); err != nil {
 		return nil, err
 	}
-	if r.Seen, err = loadIDs(q, `SELECT option_id FROM seen WHERE response_id = ?`, r.ID); err != nil {
-		return nil, err
+	if withSeen {
+		if r.Seen, err = loadIDs(q, `SELECT option_id FROM seen WHERE response_id = ?`, r.ID); err != nil {
+			return nil, err
+		}
 	}
 	return &r, nil
 }
@@ -325,7 +343,7 @@ func (s *Store) addWriteIn(surveyID, voter, text string, preview bool) (string, 
 			return fmt.Errorf("survey is not accepting responses")
 		}
 
-		prev, err := loadResponse(tx, surveyID, voter)
+		prev, err := loadResponse(tx, surveyID, voter, true)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
@@ -376,11 +394,26 @@ func countPending(sv *Survey, r *Response) int {
 
 // ResponseFor returns the answer this voter previously gave, if any.
 func (s *Store) ResponseFor(surveyID, voter string) (*Response, bool) {
-	r, err := loadResponse(s.db, surveyID, voter)
+	r, err := loadResponse(s.db, surveyID, voter, true)
 	if err != nil {
 		return nil, false
 	}
 	return r, true
+}
+
+// PriorAnswer returns what a respondent previously submitted, for redisplaying
+// their ballot: the options they picked and the comment they left.
+//
+// It returns plain values rather than a partly-filled *Response, so there is
+// nothing to mistake for a complete one. It deliberately does not read the
+// seen set -- the ballot never shows it, and loading it made the respondent
+// page measurably slower for data it discarded.
+func (s *Store) PriorAnswer(surveyID, voter string) (choices []string, comment string, ok bool) {
+	r, err := loadResponse(s.db, surveyID, voter, false)
+	if err != nil {
+		return nil, "", false
+	}
+	return r.Choices, r.Comment, true
 }
 
 // Responses returns every respondent's current answer, oldest first.

@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -398,5 +399,106 @@ func TestDefinitionDocumentCarriesNoIdentifiersAtAll(t *testing.T) {
 	}
 	if got.ID == sv.ID {
 		t.Error("a definition restore reused the original survey ID")
+	}
+}
+
+// A full backup has to carry the seen set, not just the choices. Shown is
+// derived from it, the tally asserts Votes <= Shown <= respondents, and
+// backfillSeen cannot repair a restored survey because the meta guard is
+// already set on any database old enough to restore into. Without this the
+// round trip silently turns "shown to 3" into "shown to 0" beside unchanged
+// vote counts.
+func TestFullBackupCarriesTheSeenSetSoTheTallyInvariantSurvives(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Tacos", "Ramen")
+	for _, who := range []string{"a", "b", "c"} {
+		v := s.VoterID(sv.ID, who)
+		if _, err := s.SaveResponse(sv.ID, v, []string{sv.Options[0].ID}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := shownByText(t, s, sv.ID)
+	if before["Tacos"] != 3 || before["Ramen"] != 3 {
+		t.Fatalf("precondition: shown = %v, want both options shown to 3", before)
+	}
+	checkTallyInvariant(t, s, sv.ID)
+
+	var buf bytes.Buffer
+	if err := s.WriteSurveyDocument(&buf, sv.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSurvey(sv.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ReadSurveyDocument(bytes.NewReader(buf.Bytes()), true)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	after := shownByText(t, s, got.ID)
+	if after["Tacos"] != 3 || after["Ramen"] != 3 {
+		t.Errorf("shown after restore = %v, want %v — the seen set did not survive", after, before)
+	}
+	checkTallyInvariant(t, s, got.ID)
+
+	results, _ := s.Tally(got.ID)
+	for _, r := range results {
+		if r.Votes > 0 && r.Shown == 0 {
+			t.Errorf("%s: %d votes but shown to nobody", r.Option.Text, r.Votes)
+		}
+	}
+}
+
+// A definition-only document has no responses at all, so there is nothing to
+// restore and nothing to assert beyond the survey coming back empty.
+func TestDefinitionRestoreHasNoSeenRowsBecauseItHasNoResponses(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Tacos")
+	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := s.WriteSurveyDocument(&buf, sv.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ReadSurveyDocument(bytes.NewReader(buf.Bytes()), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(s.Responses(got.ID)); n != 0 {
+		t.Fatalf("definition restore produced %d responses, want 0", n)
+	}
+	checkTallyInvariant(t, s, got.ID)
+}
+
+// A document written before seen existed carries choices and no seen. Every
+// chosen option was on that person's ballot by definition, so the restore
+// seeds seen from choices rather than leaving Votes > Shown.
+func TestRestoringADocumentWithoutSeenSeedsItFromTheChoices(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Tacos", "Ramen")
+	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := s.WriteSurveyDocument(&buf, sv.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	// Strip the seen arrays, as a pre-feature backup would have them.
+	stripped := regexp.MustCompile(`"seen": \[[^]]*\],`).ReplaceAllString(buf.String(), "")
+	if strings.Contains(stripped, `"seen"`) {
+		t.Fatalf("test setup did not strip the seen arrays")
+	}
+	if err := s.DeleteSurvey(sv.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ReadSurveyDocument(strings.NewReader(stripped), true)
+	if err != nil {
+		t.Fatalf("a document without seen must still restore: %v", err)
+	}
+	checkTallyInvariant(t, s, got.ID)
+	shown := shownByText(t, s, got.ID)
+	if shown["Tacos"] != 1 {
+		t.Errorf("the chosen option shows %d, want 1 — seen was not seeded from choices", shown["Tacos"])
 	}
 }

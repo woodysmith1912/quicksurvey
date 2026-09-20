@@ -315,3 +315,78 @@ func TestBackfillMarksPendingAndRejectedOptionsSeenOnlyByTheirProposer(t *testin
 	}
 	checkTallyInvariant(t, s, sv.ID)
 }
+
+// The backfill commits one survey at a time and records how far it got, so an
+// interruption leaves finished work committed instead of rolling the whole
+// database back and repeating it on every restart.
+func TestAnInterruptedBackfillResumesWhereItStopped(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := mustSurvey(t, s, "Alpha")
+	second := mustSurvey(t, s, "Bravo")
+	// Order by id is what the resume walks, so name them by that order.
+	done, todo := first, second
+	if done.ID > todo.ID {
+		done, todo = todo, done
+	}
+	for _, sv := range []*Survey{first, second} {
+		if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+
+	// A database mid-backfill: no completion marker, a through-marker naming
+	// the survey that did commit, and no seen rows for either.
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, dbFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`DELETE FROM seen`,
+		`DELETE FROM meta WHERE key = 'seen_backfilled'`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(
+		`INSERT OR REPLACE INTO meta (key, value) VALUES ('seen_backfilled_through', ?)`,
+		[]byte(done.ID)); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	s, err = Open(dir)
+	if err != nil {
+		t.Fatalf("resuming an interrupted backfill failed: %v", err)
+	}
+	defer s.Close()
+
+	if got := shownByText(t, s, todo.ID); got["Bravo"]+got["Alpha"] == 0 {
+		t.Errorf("the survey after the marker was not backfilled: %v", got)
+	}
+	if got := shownByText(t, s, done.ID); got["Alpha"]+got["Bravo"] != 0 {
+		t.Errorf("a survey the marker said was finished was redone: %v", got)
+	}
+
+	// And the run completed, so a second Open does nothing.
+	var marker []byte
+	if err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'seen_backfilled'`).Scan(&marker); err != nil {
+		t.Fatalf("completion marker not written: %v", err)
+	}
+	if len(marker) == 0 {
+		t.Error("the completion marker is empty; it should record when the backfill finished")
+	}
+	var through int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM meta WHERE key = 'seen_backfilled_through'`).Scan(&through); err != nil {
+		t.Fatal(err)
+	}
+	if through != 0 {
+		t.Error("the resume marker outlived the completed backfill")
+	}
+}

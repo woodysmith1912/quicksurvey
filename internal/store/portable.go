@@ -97,8 +97,15 @@ type DocumentOption struct {
 // references it, so a restore mints a fresh one rather than risking a
 // collision with a row that already exists.
 type DocumentResponse struct {
-	Voter   string    `json:"voter"`
-	Choices []string  `json:"choices"` // option IDs
+	Voter   string   `json:"voter"`
+	Choices []string `json:"choices"` // option IDs
+	// Seen is every option that was on this respondent's ballot at any
+	// submission. It has to travel with the choices: Shown is derived from it,
+	// the tally asserts Votes <= Shown <= respondents, and a restore that
+	// dropped it would put every option back reading "shown to 0" beside a
+	// nonzero vote count -- wrong, and unrepairable, because backfillSeen has
+	// already run on any database old enough to restore into.
+	Seen    []string  `json:"seen"`
 	Comment string    `json:"comment,omitempty"`
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
@@ -166,6 +173,7 @@ func (s *Store) SurveyDocument(id string, withResponses bool) (*Document, error)
 		doc.Responses = append(doc.Responses, DocumentResponse{
 			Voter:   r.Voter,
 			Choices: append([]string(nil), r.Choices...),
+			Seen:    append([]string(nil), r.Seen...),
 			Comment: r.Comment,
 			Created: r.Created,
 			Updated: r.Updated,
@@ -361,6 +369,22 @@ func restorableResponses(doc *Document, optionID map[string]string) ([]*Response
 			}
 			r.Choices = append(r.Choices, to)
 		}
+		for _, sn := range dr.Seen {
+			to, ok := optionID[sn]
+			if !ok {
+				return nil, fmt.Errorf("response %d was shown option %q, which the document does not contain",
+					i+1, sn)
+			}
+			r.Seen = append(r.Seen, to)
+		}
+		// A document written before seen existed, or one hand-edited, can
+		// carry choices without them. Every chosen option was by definition on
+		// that person's ballot, so seeding seen from choices is the weakest
+		// claim that keeps Votes <= Shown true rather than restoring a survey
+		// that reports fewer exposures than votes.
+		if len(dr.Seen) == 0 {
+			r.Seen = append([]string(nil), r.Choices...)
+		}
 		out = append(out, r)
 	}
 	return out, nil
@@ -379,6 +403,9 @@ func insertResponses(tx *sql.Tx, surveyID string, rs []*Response) error {
 				`INSERT INTO choices (response_id, option_id) VALUES (?, ?)`, r.ID, id); err != nil {
 				return err
 			}
+		}
+		if err := insertSeen(tx, r.ID, r.Seen); err != nil {
+			return err
 		}
 	}
 	return nil
