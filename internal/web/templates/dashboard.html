@@ -16,6 +16,23 @@
     <p><button class="primary" type="submit" data-testid="create-survey">Create draft</button></p>
   </form>
 </details>
+
+<details class="card">
+  <summary data-testid="restore-survey-toggle"><strong>Restore a saved survey</strong></summary>
+  <form method="post" action="/admin/surveys/restore" enctype="multipart/form-data">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label for="restore-file">Saved survey file</label>
+    <input id="restore-file" name="file" type="file" accept="application/json,.json" required
+      data-testid="restore-file">
+    <label><input type="checkbox" name="keep_id" value="1" data-testid="restore-keep-id">
+      Put it back on its original link</label>
+    <p class="hint">Leave that unticked and you get a new draft with a new link — a copy of the
+      questions, with no responses. Tick it to bring back a survey that is gone: its original link
+      works again, and people who already answered still cannot answer twice. A file that contains
+      responses can only be restored that way, and only if no survey is using that link.</p>
+    <p><button class="primary" type="submit" data-testid="restore-survey">Restore</button></p>
+  </form>
+</details>
 {{end}}
 
 <table data-testid="survey-list">

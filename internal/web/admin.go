@@ -307,10 +307,82 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/tab-separated-values; charset=utf-8")
 	w.Header().Set("Content-Disposition",
-		fmt.Sprintf("attachment; filename=%q", export.Filename(sv, kind, time.Now().In(s.cfg.Location))))
+		fmt.Sprintf("attachment; filename=%q", export.Filename(sv, kind, "tsv", time.Now().In(s.cfg.Location))))
 	if err := render(); err != nil {
 		s.cfg.Logger.Error("export failed", "survey", sv.ID, "kind", kind, "err", err)
 	}
+}
+
+// handleSaveSurvey downloads a survey as a file.
+//
+// Two kinds, and the difference matters enough to be in the URL rather than a
+// flag. "definition" is the survey itself with nothing a respondent wrote, and
+// restores as a new draft. "full" is a backup: every option and every
+// response, restorable as the survey it was.
+func (s *Server) handleSaveSurvey(w http.ResponseWriter, r *http.Request) {
+	sv, ok := s.store.Survey(r.PathValue("id"))
+	if !ok {
+		s.fail(w, r, http.StatusNotFound, errors.New("no such survey"))
+		return
+	}
+	kind := strings.TrimSuffix(r.PathValue("kind"), ".json")
+	var full bool
+	switch kind {
+	case "definition":
+	case "full":
+		full = true
+	default:
+		s.fail(w, r, http.StatusNotFound, errors.New("unknown save type"))
+		return
+	}
+	// A full backup carries response data out of the application, so it is
+	// worth a line in the log whether or not anything goes wrong.
+	s.cfg.Logger.Info("survey saved", "survey", sv.ID, "kind", kind,
+		"by", userFrom(r.Context()).Name)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q",
+		export.Filename(sv, kind, "json", time.Now().In(s.cfg.Location))))
+	if err := s.store.WriteSurveyDocument(w, sv.ID, full); err != nil {
+		s.cfg.Logger.Error("saving a survey failed", "survey", sv.ID, "kind", kind, "err", err)
+	}
+}
+
+// handleRestoreSurvey creates a survey from an uploaded file.
+//
+// Errors come back as a flash on the dashboard rather than an error page,
+// because every one of them is something the person can fix by picking a
+// different file or a different option, and the store's messages already say
+// which.
+func (s *Server) handleRestoreSurvey(w http.ResponseWriter, r *http.Request) {
+	me := userFrom(r.Context())
+	fail := func(msg string) {
+		s.setFlash(w, msg, true)
+		http.Redirect(w, r, "/admin/", http.StatusSeeOther)
+	}
+	f, hdr, err := r.FormFile("file")
+	if err != nil {
+		fail("Choose a saved survey file to restore.")
+		return
+	}
+	defer f.Close()
+
+	keepID := r.FormValue("keep_id") != ""
+	sv, err := s.store.ReadSurveyDocument(f, keepID)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	responses := len(s.store.Responses(sv.ID))
+	s.cfg.Logger.Info("survey restored", "survey", sv.ID, "from", hdr.Filename,
+		"kept_id", keepID, "responses", responses, "by", me.Name)
+
+	msg := fmt.Sprintf("Restored %q as a new draft. It has its own link, and no responses.", sv.Title)
+	if keepID {
+		msg = fmt.Sprintf("Restored %q under its original link, with %d %s.",
+			sv.Title, responses, plural(responses, "response", "responses"))
+	}
+	s.setFlash(w, msg, false)
+	http.Redirect(w, r, "/admin/s/"+sv.ID, http.StatusSeeOther)
 }
 
 // usersData drives the accounts page: approved accounts, the approval queue,

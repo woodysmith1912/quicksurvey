@@ -180,7 +180,7 @@ func TestFilename(t *testing.T) {
 		if strings.HasPrefix(want, "-") {
 			want = "surveyid" + want
 		}
-		if got := Filename(sv, "responses", now); got != want {
+		if got := Filename(sv, "responses", "tsv", now); got != want {
 			t.Errorf("Filename(%q) = %q, want %q", c.title, got, want)
 		}
 	}
