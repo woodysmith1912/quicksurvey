@@ -230,7 +230,11 @@ func saveResponseTx(tx *sql.Tx, surveyID, voter string, choices []string, commen
 		}
 	}
 	// Because the set only grows, an unchanged length means an unchanged set,
-	// and there is nothing to write. That is the common case: a respondent
+	// and there is nothing to write. That rests on two invariants held
+	// elsewhere: options are never deleted (status transitions instead), and
+	// every seen row names an option of its own survey -- so r.Seen, built by
+	// filtering the union back through sv.Options, can never lose an entry
+	// that prev.Seen had. That is the common case: a respondent
 	// changing their mind has seen exactly what they saw before. Without this
 	// every resubmission re-issued one statement per option -- on a large
 	// survey, hundreds of no-op writes inside the single write lock.
@@ -261,10 +265,6 @@ func loadIDs(q queryer, query string, args ...any) ([]string, error) {
 	return out, rows.Err()
 }
 
-// loadResponse reads one respondent's answer. withSeen controls whether the
-// seen set comes with it: it is roughly as long as the survey's option list,
-// several times the choices, and the ballot page -- the hottest read in the
-// application -- does not look at it.
 // insertSeen adds the response's seen rows in one statement. INSERT OR IGNORE
 // against the primary key makes rows that are already there a no-op, which is
 // what lets the whole set be written without first deleting it.
@@ -283,6 +283,10 @@ func insertSeen(tx *sql.Tx, responseID string, ids []string) error {
 	return err
 }
 
+// loadResponse reads one respondent's answer. withSeen controls whether the
+// seen set comes with it: it is roughly as long as the survey's option list,
+// several times the choices, and the ballot page -- the hottest read in the
+// application -- does not look at it.
 func loadResponse(q queryer, surveyID, voter string, withSeen bool) (*Response, error) {
 	var r Response
 	var created, updated string
@@ -343,7 +347,10 @@ func (s *Store) addWriteIn(surveyID, voter, text string, preview bool) (string, 
 			return fmt.Errorf("survey is not accepting responses")
 		}
 
-		prev, err := loadResponse(tx, surveyID, voter, true)
+		// Without the seen set: this only needs the pending count, the
+		// existing choices and the comment. saveResponseTx below loads its
+		// own prev with the set, which is what the union is built from.
+		prev, err := loadResponse(tx, surveyID, voter, false)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}

@@ -302,8 +302,10 @@ func (s *Store) migrate() error {
 // before they existed.
 func (s *Store) backfillSeen() error {
 	// Checked outside a transaction, so an up-to-date database does not take
-	// the write lock on every process start -- serve, export, backup,
-	// healthcheck and every test store all call this.
+	// the write lock on every process start -- serve, export, backup, the
+	// user subcommands and every test store all open the store. (healthcheck
+	// does not; it is an HTTP GET.) Each per-survey transaction re-checks,
+	// because this read holds no lock.
 	var done int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM meta WHERE key = 'seen_backfilled'`).Scan(&done); err != nil {
 		return err
@@ -340,7 +342,7 @@ func (s *Store) backfillSeen() error {
 	}
 	if total > 0 {
 		slog.Info("upgrading the database", "table", "seen", "backfilled_rows", total,
-			"surveys", len(ids))
+			"surveys_scanned", len(ids))
 	}
 	// The value is the completion time rather than a flag, so a database that
 	// legitimately backfilled nothing stays distinguishable from one that
@@ -380,6 +382,23 @@ func (s *Store) surveyIDsAfter(through string) ([]string, error) {
 func (s *Store) backfillSeenForSurvey(surveyID string) (int64, error) {
 	var n int64
 	err := s.tx(func(tx *sql.Tx) error {
+		// Re-checked here, not just once at the start. The cheap guard in
+		// backfillSeen is a lock-free read, so two processes -- serve and a
+		// backup or export run against the same directory -- can both pass it
+		// and both start. Whichever finishes first marks the database done
+		// and begins serving; the other would keep going and apply the
+		// blanket "everyone saw it" rule to options added since, marking them
+		// as shown to people who answered before they existed. That inflates
+		// Shown permanently and nothing would ever notice. s.tx is
+		// BEGIN IMMEDIATE, so this read is serialised against that writer.
+		var done int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM meta WHERE key = 'seen_backfilled'`).Scan(&done); err != nil {
+			return err
+		}
+		if done > 0 {
+			return nil
+		}
 		// OptPending and OptRejected are excluded from the blanket "everyone
 		// saw it" rule below (see the doc comment); the EXISTS clause instead
 		// marks them seen only by whichever response actually voted for them.

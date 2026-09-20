@@ -2,8 +2,12 @@ package store
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"sort"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -378,8 +382,11 @@ func TestAnInterruptedBackfillResumesWhereItStopped(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'seen_backfilled'`).Scan(&marker); err != nil {
 		t.Fatalf("completion marker not written: %v", err)
 	}
-	if len(marker) == 0 {
-		t.Error("the completion marker is empty; it should record when the backfill finished")
+	// Parsed, not merely non-empty: the value is a completion time so that a
+	// database which legitimately backfilled nothing stays distinguishable
+	// from one that never ran. An opaque flag byte would lose that.
+	if _, err := time.Parse(time.RFC3339, string(marker)); err != nil {
+		t.Errorf("completion marker %q is not an RFC3339 time: %v", marker, err)
 	}
 	var through int
 	if err := s.db.QueryRow(
@@ -388,5 +395,86 @@ func TestAnInterruptedBackfillResumesWhereItStopped(t *testing.T) {
 	}
 	if through != 0 {
 		t.Error("the resume marker outlived the completed backfill")
+	}
+}
+
+// The resume marker is only trustworthy if it cannot outrun what was
+// committed. This injects a real failure inside the per-survey transaction —
+// a trigger that aborts the seen INSERT — and asserts the marker did not
+// advance past the survey that failed.
+//
+// Without the shared transaction the marker would claim a survey whose rows
+// rolled back, and that survey would be skipped forever: zero exposures
+// beside real votes, with the completion guard set so backfillSeen can never
+// revisit it. That is the unrepairable case, and nothing else pins it.
+func TestAFailedSurveyDoesNotAdvanceTheResumeMarker(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, title := range []string{"Alpha", "Bravo", "Charlie"} {
+		sv := mustSurvey(t, s, title)
+		if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, sv.ID)
+	}
+	sort.Strings(ids) // the order the backfill walks
+	s.Close()
+
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, dbFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{`DELETE FROM seen`, `DELETE FROM meta WHERE key = 'seen_backfilled'`} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Abort any seen row belonging to the second survey the backfill reaches.
+	// Inlined rather than bound: SQLite refuses variables in a trigger body.
+	// Survey ids come from a fixed lowercase-alphanumeric alphabet, so there
+	// is nothing to escape.
+	if _, err := db.Exec(fmt.Sprintf(`
+		CREATE TRIGGER poison BEFORE INSERT ON seen
+		WHEN (SELECT r.survey_id FROM responses r WHERE r.id = NEW.response_id) = '%s'
+		BEGIN SELECT RAISE(ABORT, 'poisoned'); END`, ids[1])); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	if _, err := Open(dir); err == nil {
+		t.Fatal("Open succeeded despite the backfill failing; the error was swallowed")
+	}
+
+	db, err = sql.Open("sqlite", "file:"+filepath.Join(dir, dbFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var through []byte
+	switch err := db.QueryRow(
+		`SELECT value FROM meta WHERE key = 'seen_backfilled_through'`).Scan(&through); {
+	case errors.Is(err, sql.ErrNoRows):
+		t.Fatal("no resume marker at all; the first survey's work was rolled back with the second's")
+	case err != nil:
+		t.Fatal(err)
+	}
+	if got := string(through); got != ids[0] {
+		t.Errorf("resume marker = %q, want %q — it must not advance past a survey whose rows "+
+			"did not commit, or that survey is skipped forever", got, ids[0])
+	}
+
+	// And the completion marker must not be set: the run did not finish.
+	var done int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM meta WHERE key = 'seen_backfilled'`).Scan(&done); err != nil {
+		t.Fatal(err)
+	}
+	if done != 0 {
+		t.Error("the backfill marked itself complete despite failing partway")
 	}
 }

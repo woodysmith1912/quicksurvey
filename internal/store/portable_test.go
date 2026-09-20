@@ -449,11 +449,12 @@ func TestFullBackupCarriesTheSeenSetSoTheTallyInvariantSurvives(t *testing.T) {
 	}
 }
 
-// A definition-only document has no responses at all, so there is nothing to
-// restore and nothing to assert beyond the survey coming back empty.
-func TestDefinitionRestoreHasNoSeenRowsBecauseItHasNoResponses(t *testing.T) {
+// A definition-only document carries no responses, so the restored survey
+// must hold no seen rows at all -- asserted against the table, because the
+// invariant check is vacuous on a survey nobody has answered.
+func TestDefinitionRestoreLeavesNoSeenRows(t *testing.T) {
 	s := newStore(t)
-	sv := mustSurvey(t, s, "Tacos")
+	sv := mustSurvey(t, s, "Tacos", "Ramen")
 	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -468,13 +469,22 @@ func TestDefinitionRestoreHasNoSeenRowsBecauseItHasNoResponses(t *testing.T) {
 	if n := len(s.Responses(got.ID)); n != 0 {
 		t.Fatalf("definition restore produced %d responses, want 0", n)
 	}
-	checkTallyInvariant(t, s, got.ID)
+	var seen int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM seen sn JOIN responses r ON r.id = sn.response_id
+		 WHERE r.survey_id = ?`, got.ID).Scan(&seen); err != nil {
+		t.Fatal(err)
+	}
+	if seen != 0 {
+		t.Errorf("%d seen rows on a survey restored without responses", seen)
+	}
 }
 
-// A document written before seen existed carries choices and no seen. Every
-// chosen option was on that person's ballot by definition, so the restore
-// seeds seen from choices rather than leaving Votes > Shown.
-func TestRestoringADocumentWithoutSeenSeedsItFromTheChoices(t *testing.T) {
+// A document written before seen existed carries choices and no seen. The
+// restore has to guess, and it guesses the same way backfillSeen does for a
+// database upgraded in place -- otherwise the same pre-seen data reports
+// different interest depending on which route it took into the new build.
+func TestRestoringADocumentWithoutSeenGuessesLikeTheBackfill(t *testing.T) {
 	s := newStore(t)
 	sv := mustSurvey(t, s, "Tacos", "Ramen")
 	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
@@ -498,7 +508,12 @@ func TestRestoringADocumentWithoutSeenSeedsItFromTheChoices(t *testing.T) {
 	}
 	checkTallyInvariant(t, s, got.ID)
 	shown := shownByText(t, s, got.ID)
-	if shown["Tacos"] != 1 {
-		t.Errorf("the chosen option shows %d, want 1 — seen was not seeded from choices", shown["Tacos"])
+	// Both options: the seeded set has to match what an in-place upgrade
+	// would have produced. Seeding from the choices alone would leave Ramen
+	// at 0 and report Tacos at 100% interest; seeding from every option in
+	// the document would inflate both. Only the backfill's rule gives 1 and 1.
+	if shown["Tacos"] != 1 || shown["Ramen"] != 1 {
+		t.Errorf("shown = %v, want both at 1 — the restore should guess the same way "+
+			"backfillSeen does for a database upgraded in place", shown)
 	}
 }

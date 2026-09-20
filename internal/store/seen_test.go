@@ -46,7 +46,7 @@ func TestSubmittingRecordsTheApprovedOptionsAsSeen(t *testing.T) {
 	}
 	r, _ := s.ResponseFor(sv.ID, v)
 	if !slices.Contains(r.Seen, sv.Options[1].ID) || slices.Contains(r.Seen, sv.Options[2].ID) {
-		t.Error("Saw disagrees with Seen")
+		t.Error("membership in Seen disagrees with the recorded set")
 	}
 
 	// Like everything else, it survives a restart.
@@ -268,4 +268,113 @@ func TestCommentsReturnsOnlyResponsesWithACommentOldestFirst(t *testing.T) {
 		t.Errorf("Comments = %q, %q, want oldest first: %q, %q",
 			got[0].Comment, got[1].Comment, "first comment", "second comment")
 	}
+}
+
+// Visibility is defined twice: visibleTo decides what goes into the seen set,
+// and Ballot/BallotFor decide what a respondent is actually shown. They have
+// to agree, or Shown counts exposures that never happened — or misses ones
+// that did.
+//
+// CLAUDE.md records that nothing enforces the agreement. This enforces it, for
+// every status and for the three respondent positions that matter: no prior
+// response, a prior response holding its own pending write-in, and a prior
+// response holding none.
+func TestBallotAndVisibleToAgreeOnWhatIsOnTheBallot(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Approved", "ToRemove", "ToMerge")
+	mine, other := s.VoterID(sv.ID, "mine"), s.VoterID(sv.ID, "other")
+
+	// Each respondent proposes a write-in, so each has one pending option
+	// visible only to them. One is then rejected.
+	minePending, err := s.AddWriteIn(sv.ID, mine, "Mine pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPending, err := s.AddWriteIn(sv.ID, other, "Other pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv, err = s.UpdateSurvey(sv.ID, func(d *Survey) error {
+		for i := range d.Options {
+			switch d.Options[i].Text {
+			case "ToRemove":
+				d.Options[i].Status = OptRemoved
+			case "ToMerge":
+				d.Options[i].Status, d.Options[i].MergedInto = OptMerged, d.Options[0].ID
+			}
+			if d.Options[i].ID == otherPending {
+				d.Options[i].Status = OptRejected
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sv.Options) != 5 {
+		t.Fatalf("precondition: want approved, removed, merged, pending and rejected; got %d options",
+			len(sv.Options))
+	}
+
+	set := func(opts []Option) map[string]bool {
+		m := map[string]bool{}
+		for _, o := range opts {
+			m[o.ID] = true
+		}
+		return m
+	}
+	admits := func(prev *Response) map[string]bool {
+		m := map[string]bool{}
+		for _, o := range sv.Options {
+			// allowPending is the option being proposed in this same request;
+			// a plain ballot render proposes nothing.
+			if visibleTo(o, prev, "") {
+				m[o.ID] = true
+			}
+		}
+		return m
+	}
+	eq := func(a, b map[string]bool) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for k := range a {
+			if !b[k] {
+				return false
+			}
+		}
+		return true
+	}
+
+	for _, c := range []struct {
+		name  string
+		voter string
+	}{
+		{"a respondent holding their own pending write-in", mine},
+		{"a respondent whose write-in was rejected", other},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			prev, ok := s.ResponseFor(sv.ID, c.voter)
+			if !ok {
+				t.Fatal("no prior response")
+			}
+			shown, recorded := set(sv.BallotFor(prev.Choices, c.voter)), admits(prev)
+			if !eq(shown, recorded) {
+				t.Errorf("the ballot shows %d options and visibleTo admits %d; they must agree "+
+					"or Shown counts exposures that did not happen\n  ballot:    %v\n  visibleTo: %v",
+					len(shown), len(recorded), shown, recorded)
+			}
+		})
+	}
+
+	t.Run("a respondent who has not answered", func(t *testing.T) {
+		shown, recorded := set(sv.BallotFor(nil, "newcomer")), admits(nil)
+		if !eq(shown, recorded) {
+			t.Errorf("for a first-time respondent the ballot shows %v but visibleTo admits %v",
+				shown, recorded)
+		}
+		if shown[minePending] {
+			t.Error("someone else's pending write-in is on a newcomer's ballot")
+		}
+	})
 }

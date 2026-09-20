@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -29,7 +30,7 @@ import (
 // to blank the fields before writing.
 const (
 	docFormat  = "quicksurvey.survey"
-	docVersion = 1
+	docVersion = 2
 )
 
 // Document is one saved survey.
@@ -280,6 +281,14 @@ func (s *Store) RestoreSurvey(doc *Document, keepID bool) (*Survey, error) {
 		}
 	}
 
+	// A restored survey has to respect the same ceiling a live one does.
+	// Without this a document can carry a survey past the point where
+	// AddOption refuses, after which write-ins are permanently rejected, and
+	// the real limit becomes an incidental SQLite bind-variable count.
+	if n := len(doc.Survey.Options); n > maxOptions {
+		return nil, fmt.Errorf("document has %d options; the maximum is %d", n, maxOptions)
+	}
+
 	// optionID maps what the document called an option to what it is called
 	// once restored, so stored choices still point at the right thing.
 	optionID := map[string]string{}
@@ -329,7 +338,7 @@ func (s *Store) RestoreSurvey(doc *Document, keepID bool) (*Survey, error) {
 		}
 	}
 
-	responses, err := restorableResponses(doc, optionID)
+	responses, err := restorableResponses(doc, optionID, sv.Options)
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +357,17 @@ func (s *Store) RestoreSurvey(doc *Document, keepID bool) (*Survey, error) {
 // restorableResponses converts the document's responses, remapping option IDs
 // and refusing any choice that names an option the document does not contain.
 // A dangling choice would silently drop a vote.
-func restorableResponses(doc *Document, optionID map[string]string) ([]*Response, error) {
+func restorableResponses(doc *Document, optionID map[string]string, opts []Option) ([]*Response, error) {
+	// order is every restored option id in survey order; blanketSeen is the
+	// subset backfillSeen would mark as shown to everyone.
+	order := make([]string, 0, len(opts))
+	var blanketSeen []string
+	for _, o := range opts {
+		order = append(order, o.ID)
+		if o.Status != OptPending && o.Status != OptRejected {
+			blanketSeen = append(blanketSeen, o.ID)
+		}
+	}
 	var out []*Response
 	for i, dr := range doc.Responses {
 		if dr.Voter == "" {
@@ -369,21 +388,42 @@ func restorableResponses(doc *Document, optionID map[string]string) ([]*Response
 			}
 			r.Choices = append(r.Choices, to)
 		}
+		// Unlike a choice, an unmappable seen entry is not an error. A choice
+		// that names nothing is a lost ballot; an exposure that names nothing
+		// is a lost denominator. Failing the whole restore over one -- and a
+		// seen set names most of the option list, so a single option the
+		// sanitiser drops would name nearly every response -- is the wrong
+		// trade on a recovery path.
+		seen := map[string]bool{}
 		for _, sn := range dr.Seen {
-			to, ok := optionID[sn]
-			if !ok {
-				return nil, fmt.Errorf("response %d was shown option %q, which the document does not contain",
-					i+1, sn)
+			if to, ok := optionID[sn]; ok {
+				seen[to] = true
 			}
-			r.Seen = append(r.Seen, to)
 		}
-		// A document written before seen existed, or one hand-edited, can
-		// carry choices without them. Every chosen option was by definition on
-		// that person's ballot, so seeding seen from choices is the weakest
-		// claim that keeps Votes <= Shown true rather than restoring a survey
-		// that reports fewer exposures than votes.
+		// A document written before seen existed carries none at all. Guess
+		// the same way backfillSeen guesses for a database upgraded in place,
+		// so the two routes out of a pre-seen world agree: every option that
+		// was on the ballot for everyone, which is all of them except pending
+		// and rejected write-ins. Guessing "only what they picked" instead
+		// would report Shown == Votes and Interest 100% for every option,
+		// which is not a weaker claim but a confidently wrong one.
 		if len(dr.Seen) == 0 {
-			r.Seen = append([]string(nil), r.Choices...)
+			for _, id := range blanketSeen {
+				seen[id] = true
+			}
+		}
+		// Whatever the source, every option this respondent chose was on their
+		// ballot by definition. Unconditional, so a document carrying a
+		// partial seen set cannot restore a survey with more votes than
+		// exposures.
+		for _, c := range r.Choices {
+			seen[c] = true
+		}
+		// Survey order, so the stored list is deterministic.
+		for _, o := range order {
+			if seen[o] {
+				r.Seen = append(r.Seen, o)
+			}
 		}
 		out = append(out, r)
 	}
@@ -440,11 +480,36 @@ func (s *Store) WriteSurveyDocument(w io.Writer, id string, withResponses bool) 
 
 // ReadSurveyDocument restores a survey from JSON.
 func (s *Store) ReadSurveyDocument(r io.Reader, keepID bool) (*Survey, error) {
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("reading survey document: %w", err)
+	}
+	// The version is read first, leniently. The strict decode below rejects a
+	// field this build does not know -- which is what a newer document is
+	// full of -- so checking the version afterwards would report
+	// `unknown field "..."` for what is really a version mismatch. On the
+	// restore path, of all places, the error should say what is wrong.
+	var head struct {
+		Format  string `json:"format"`
+		Version int    `json:"version"`
+	}
+	if err := json.Unmarshal(body, &head); err != nil {
+		return nil, fmt.Errorf("reading survey document: %w", err)
+	}
+	if head.Format != docFormat {
+		return nil, fmt.Errorf("not a quicksurvey survey document (format %q, want %q)",
+			head.Format, docFormat)
+	}
+	if head.Version > docVersion {
+		return nil, fmt.Errorf("document is version %d; this quicksurvey understands up to %d",
+			head.Version, docVersion)
+	}
+
 	var doc Document
-	dec := json.NewDecoder(r)
-	// An unknown field means the file was written by something this build does
-	// not understand. Restoring it anyway would drop the field in silence,
-	// which is the failure mode a restore exists to rule out.
+	dec := json.NewDecoder(bytes.NewReader(body))
+	// An unknown field in a document of a version we do claim to understand is
+	// a malformed file, not a newer one. Restoring it anyway would drop the
+	// field in silence, which is the failure mode a restore exists to rule out.
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("reading survey document: %w", err)
