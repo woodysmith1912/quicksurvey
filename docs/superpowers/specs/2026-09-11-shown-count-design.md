@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS seen (
 );
 ```
 
-`Response` gains `Seen []string` and `Saw(id string) bool`. `loadResponse` and
+`Response` gains `Seen []string`. It deliberately gains no `Saw` helper: a raw membership test would not resolve merge pointers, unlike every other visibility check in the system, so a caller asking "was this shown to them" would disagree with the tally. The export resolves through `sv.Resolve` instead. `loadResponse` and
 `Responses()` load `seen` rows alongside `choices`.
 
 ### Backfill
@@ -84,7 +84,11 @@ visible  = { o : approved } ∪ { o : pending ∧ (o == allowPending ∨ prev.Ch
 r.Seen   = visible ∪ prev.Seen
 ```
 
-Written by delete-and-insert on `seen`, as `choices` is.
+Written with a single batched `INSERT OR IGNORE`, and only when the set
+actually changed. Unlike `choices`, which can shrink and so is deleted and
+reinserted, `seen` only ever grows: the primary key makes an existing row a
+no-op, so no delete is needed, and an unchanged length proves an unchanged
+set, so the common resubmission writes nothing at all.
 
 Write-ins call `saveResponseTx` with `allowPending` set to the new option, so
 the proposer is recorded as having seen their own suggestion from the moment

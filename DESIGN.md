@@ -109,7 +109,9 @@ Four rather than more because sixteen measured *worse* than four, at 328µs. Pas
 the point where readers overlap, extra connections buy nothing and cost
 scheduling. Writes still serialise, which is correct, and `_txlock=immediate`
 with `busy_timeout` is what makes that a wait rather than an error. Both
-figures predate `seen`; see below for what that changes and what it doesn't.
+figures predate `seen`. The pool size was re-checked after it landed and four
+still measures best; the tally figures below were re-measured and are quoted
+with their new numbers.
 
 ### What the benchmark actually found
 
@@ -341,7 +343,16 @@ row, so it grows linearly with the survey while nothing else does. Before the
 measured at 16ms and 2.7MB per request at a thousand respondents, against
 0.65ms and 123KB for the same page without. A seen set runs several times the
 size of a choice set — roughly 4x the rows, in the shape this benchmark uses
-(30 options, about 10 selected) — so both figures are higher now.
+(30 options, about 10 selected) — so both figures are higher now. Re-measured
+at 30 options and a thousand respondents: **45.8ms and 10.9MB**, 2.9x both.
+At a hundred options it is 199ms and 31MB, which is the number to watch
+against the container's 192Mi limit, and the argument for keying the cache
+per survey rather than bumping one global counter.
+
+The ballot page itself does not pay for this. `loadResponse` takes a
+`withSeen` flag and the respondent path passes false, because nothing on that
+page reads the set: loading it cost +43% on the ballot and +101% on the
+results page, measured, for rows that were discarded.
 
 It is cached now, and the interesting part is the invalidation. Every write that
 can change a tally — a response, a moderation decision, a merge, publishing,
