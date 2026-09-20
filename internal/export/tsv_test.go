@@ -506,9 +506,10 @@ func TestTheSeenSetIsResolvedThroughMergesLikeTheChoicesAre(t *testing.T) {
 	if row == nil {
 		t.Fatalf("no export row for v1")
 	}
-	if row[col] == "" {
-		t.Errorf("the merge target's cell is blank for a respondent who was shown the "+
-			"duplicate it absorbed; the seen set was not resolved through the merge: %v", row)
+	if row[col] != "0" {
+		t.Errorf("the merge target's cell is %q, want \"0\" — the respondent was shown the "+
+			"duplicate it absorbed but did not pick it; a blank would read as never shown: %v",
+			row[col], row)
 	}
 }
 

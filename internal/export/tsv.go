@@ -96,17 +96,29 @@ func resolvedSets(resolve map[string]string, r *store.Response) (chosen, seen ma
 	return chosen, seen
 }
 
-// resolveMap resolves every option in the survey through its merge chain once,
-// so the per-response work is a map lookup rather than sv.Resolve's linear
-// scan of sv.Options.
+// resolveMap records where each merged option ends up, once per export, so
+// the per-response work is a map lookup rather than sv.Resolve's linear scan
+// of sv.Options for every choice and every seen entry.
 //
-// This is what keeps the export linear in the option count. r.Seen is roughly
-// as long as sv.Options -- that is what a seen set is -- so resolving each
-// entry with a scan made the per-response cost O(options^2), and at a hundred
-// options that scan was most of the export's runtime.
+// That scan was the export's dominant cost: r.Seen is roughly as long as
+// sv.Options -- that is what a seen set is -- so resolving each entry by
+// scanning made the per-response work quadratic in the option count. This
+// does not make the export linear, because sv.Resolve still scans and is
+// called here; it removes the per-response multiplier, which is the term that
+// grew.
+//
+// Only merged options are mapped. Everything else resolves to itself, which
+// is what resolveVia returns for a key it does not find -- so a survey with
+// no merges builds an empty map and pays nothing.
 func resolveMap(sv *store.Survey) map[string]string {
-	m := make(map[string]string, len(sv.Options))
+	var m map[string]string
 	for _, o := range sv.Options {
+		if o.Status != store.OptMerged {
+			continue
+		}
+		if m == nil {
+			m = map[string]string{}
+		}
 		resolved, _ := sv.Resolve(o.ID)
 		m[o.ID] = resolved
 	}
