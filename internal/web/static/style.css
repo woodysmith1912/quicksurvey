@@ -60,6 +60,12 @@ th, td { text-align:left; padding:.45rem .5rem; border-bottom:1px solid var(--li
 th { font-weight:600; color:var(--muted); font-size:.82rem; text-transform:uppercase; letter-spacing:.03em; }
 td.num, th.num { text-align:right; white-space:nowrap; }
 progress.bar { width:100%; height:.5rem; }
+/* The bar column is purely decorative (it repeats what Votes/Share already
+   say), so on a narrow screen it is the thing that gives way rather than
+   forcing the four numeric columns to wrap or the page to scroll sideways. */
+@media (max-width: 480px) {
+  .barcol { display:none; }
+}
 .state { font-size:.75rem; border:1px solid var(--line); border-radius:99px; padding:.05rem .5rem; color:var(--muted); }
 .state-open { color:var(--accent); border-color:var(--accent); }
 .state-closed { color:var(--warn); border-color:var(--warn); }

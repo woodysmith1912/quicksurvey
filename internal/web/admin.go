@@ -82,11 +82,7 @@ func (s *Server) loadAdminSurvey(w http.ResponseWriter, r *http.Request) (*admin
 		Pending:   sv.PendingOptions(),
 		CanEdit:   userFrom(r.Context()).Role.AtLeast(store.RoleEditor),
 	}
-	for _, resp := range s.store.Responses(sv.ID) {
-		if resp.Comment != "" {
-			d.Comments = append(d.Comments, resp)
-		}
-	}
+	d.Comments = s.store.Comments(sv.ID)
 	for _, o := range sv.Options {
 		switch o.Status {
 		case store.OptApproved:

@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { createSurvey, publish, respondent, signIn, tally, thumbsUp } from '../helpers';
+import { createSurvey, publish, respondent, shownTo, signIn, tally, thumbsUp } from '../helpers';
 
 test.describe('write-ins and moderation', () => {
   test('a suggestion is private until approved, then counts for its author', async ({ page, browser }) => {
@@ -29,6 +29,11 @@ test.describe('write-ins and moderation', () => {
     await other.goto(s.url);
     await expect(other.getByTestId('option').filter({ hasText: 'Escape room' })).toHaveCount(0);
 
+    // They answer with nothing selected, so they count as a respondent who
+    // was shown Bowling and not the suggestion.
+    await other.getByTestId('submit-vote').click();
+    await expect(other.getByTestId('flash')).toContainText('recorded');
+
     // It is not in the tally yet either.
     await page.goto(s.adminUrl);
     expect(await tally(page)).toEqual({ Bowling: 1 });
@@ -42,10 +47,19 @@ test.describe('write-ins and moderation', () => {
     // The author's vote carried over without them coming back.
     expect(await tally(page)).toEqual({ Bowling: 1, 'Escape room (downtown)': 1 });
 
+    // Two people answered, but only the author had the suggestion on their ballot.
+    expect(await shownTo(page)).toEqual({ Bowling: 2, 'Escape room (downtown)': 1 });
+
     // And now everyone sees it, unmarked.
     await other.goto(s.url);
     await expect(other.getByTestId('option').filter({ hasText: 'Escape room (downtown)' })).toBeVisible();
     await expect(other.locator('body')).not.toContainText('awaiting review');
+
+    // Once the other person answers again with it on their ballot, it has been shown to them.
+    await other.getByTestId('submit-vote').click();
+    await expect(other.getByTestId('flash')).toContainText('recorded');
+    await page.goto(s.adminUrl);
+    expect(await shownTo(page)).toEqual({ Bowling: 2, 'Escape room (downtown)': 2 });
 
     await authorCtx.close();
     await otherCtx.close();

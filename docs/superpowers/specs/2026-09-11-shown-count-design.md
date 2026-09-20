@@ -22,8 +22,16 @@ what fraction of those picked it.
 | Resubmission | The seen set is the **union** across all of a respondent's submissions. Once shown, always shown. |
 | Merges | Resolve seen options through merge pointers exactly as votes are. A respondent who saw both X and Y where X merged into Y counts once for Y. |
 | Presentation | **Keep** Share (of all respondents). **Add** Shown to (count) and Interest (% of those shown). |
-| Existing data | One-time backfill: every existing response is treated as having seen every option in its survey at migration time. |
+| Existing data | One-time backfill: every existing response is treated as having seen every approved, removed, or merged option in its survey at migration time. A pending or rejected option is backfilled as seen only by the response that voted for it, since that response can only be its proposer — nobody else could have had it on their ballot. |
 | Wide export | `1` picked, `0` shown and not picked, **blank** never shown. |
+
+The "Existing data" row was not the original decision. The original choice was
+the blunter rule above applied to every option regardless of status. A live
+upgrade test against a real 0.3.0 container showed what that cost: a write-in
+left pending across the upgrade and later approved reported shown 5 and
+interest 20% for a survey where the only person who had ever seen it was the
+one respondent who picked it — a true interest of 100%. The rule was narrowed
+to the one above as a result.
 
 ## Data model
 
@@ -46,8 +54,17 @@ Run once, inside `migrate()`, guarded by a `meta` key (`seen_backfilled`):
 
 ```sql
 INSERT OR IGNORE INTO seen (response_id, option_id)
-SELECT r.id, o.id FROM responses r JOIN options o ON o.survey_id = r.survey_id;
+SELECT r.id, o.id FROM responses r JOIN options o ON o.survey_id = r.survey_id
+WHERE o.status NOT IN (?, ?)  -- OptPending, OptRejected
+   OR EXISTS (SELECT 1 FROM choices c
+              WHERE c.response_id = r.id AND c.option_id = o.id);
 ```
+
+Approved, removed, and merged options are backfilled as seen by every
+pre-existing response, as before. Pending and rejected are excluded from that
+blanket insert; the `EXISTS` clause instead gives each of those a seen row
+only for the response that actually voted for it, which can only be its
+proposer.
 
 Idempotent by construction (`OR IGNORE`), and the key stops it re-running so
 options added after the upgrade are not retroactively marked seen by old
@@ -93,8 +110,9 @@ any submit bumps the generation as before.
 
 Invariant: for every option, `Votes <= Shown <= respondents`. A respondent can
 only choose what was on their ballot, and every seen row belongs to a
-respondent. The backfill preserves this because it inserts a row for every
-(response, option) pair.
+respondent. The backfill preserves this because its `EXISTS` clause means any
+response carrying a vote for an option is unconditionally also given a seen
+row for it, whatever that option's status.
 
 ## Presentation
 

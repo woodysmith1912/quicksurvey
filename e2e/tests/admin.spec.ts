@@ -133,10 +133,14 @@ test.describe('administration', () => {
     expect(r.rows[0].comment).toBe('tab here');
 
     const summary = parseTsv(await downloadText(page, 'export-summary'));
-    expect(summary.header).toEqual(['option', 'votes', 'respondents', 'percent_of_respondents']);
+    expect(summary.header).toEqual([
+      'option', 'votes', 'respondents', 'percent_of_respondents', 'shown_to', 'percent_of_shown',
+    ]);
     const alpha = summary.rows.find((row) => row.option === 'Alpha')!;
     expect(alpha.votes).toBe('1');
     expect(alpha.percent_of_respondents).toBe('100.0');
+    expect(alpha.shown_to).toBe('1');
+    expect(alpha.percent_of_shown).toBe('100.0');
   });
 });
 
