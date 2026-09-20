@@ -60,6 +60,10 @@ func (s *Store) VoterID(surveyID, token string) string {
 	return s.MAC("voter", surveyID, token)[:22]
 }
 
+// responseIDLen matches optionIDLen: responses.id is a primary key across
+// every survey, and anonymous respondents mint them.
+const responseIDLen = 12
+
 // MaxComment bounds the free-text field, so one respondent cannot fill the disk.
 const MaxComment = 2000
 
@@ -112,7 +116,7 @@ func saveResponseTx(tx *sql.Tx, surveyID, voter string, choices []string, commen
 	}
 
 	now := time.Now().UTC()
-	r := &Response{ID: newID(12), Voter: voter, Created: now, Updated: now}
+	r := &Response{ID: newID(responseIDLen), Voter: voter, Created: now, Updated: now}
 	if prev != nil {
 		r.ID, r.Created = prev.ID, prev.Created
 	}

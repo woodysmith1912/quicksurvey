@@ -138,7 +138,7 @@ func Summary(w io.Writer, sv *store.Survey, results []store.Result, respondents 
 
 // Filename returns a download name that sorts sensibly and survives a file
 // manager: no spaces, no punctuation beyond dash and dot.
-func Filename(sv *store.Survey, kind string, now time.Time) string {
+func Filename(sv *store.Survey, kind, ext string, now time.Time) string {
 	slug := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
@@ -160,5 +160,5 @@ func Filename(sv *store.Survey, kind string, now time.Time) string {
 	if len(slug) > 60 {
 		slug = strings.Trim(slug[:60], "-")
 	}
-	return fmt.Sprintf("%s-%s-%s.tsv", slug, kind, now.Format("20060102"))
+	return fmt.Sprintf("%s-%s-%s.%s", slug, kind, now.Format("20060102"), ext)
 }

@@ -103,10 +103,33 @@
 {{end}}
 
 {{if $d.CanEdit}}
+<h2>Save this survey</h2>
+<div class="card">
+  <p>A saved survey is a file on your computer. You can keep it, and restore it later from the
+    Surveys page — here or on another quicksurvey.</p>
+  <p class="row">
+    <a class="btn" href="/admin/s/{{$d.Survey.ID}}/save/definition.json"
+       data-testid="save-definition">Save the questions</a>
+    <a class="btn" href="/admin/s/{{$d.Survey.ID}}/save/full.json"
+       data-testid="save-full">Save everything, including responses</a>
+  </p>
+  <p class="hint"><strong>The questions</strong> are the survey itself — title, description and the
+    options on the ballot — and nothing anyone answered. Suggestions still waiting for review, and
+    ones you rejected, are not in it either. Restoring gives you a new draft with its own link,
+    which is how you start a survey from this one.</p>
+  <p class="hint"><strong>Everything</strong> adds the {{$d.Responses}}
+    {{plural $d.Responses "response" "responses"}}. Restore it and the survey comes back exactly as
+    it is now, on its original link, and anyone who already answered still cannot answer twice.
+    Save this before you delete anything you might want back.</p>
+</div>
+{{end}}
+
+{{if $d.CanEdit}}
 <h2>Delete</h2>
 <form method="post" action="/admin/s/{{$d.Survey.ID}}/delete" class="card">
   <input type="hidden" name="csrf" value="{{.CSRF}}">
-  <p>Deleting removes the survey and all {{$d.Responses}} {{plural $d.Responses "response" "responses"}}. This cannot be undone.</p>
+  <p>Deleting removes the survey and all {{$d.Responses}} {{plural $d.Responses "response" "responses"}}.
+    Nothing here can undo it — save everything first if there is any chance you want it back.</p>
   <label for="confirm">Type the survey title to confirm</label>
   <input id="confirm" name="confirm" type="text" data-testid="delete-confirm" autocomplete="off">
   <p><button class="danger" type="submit" data-testid="delete-survey">Delete this survey</button></p>

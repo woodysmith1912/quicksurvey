@@ -302,7 +302,7 @@ func (s *Store) CreateSurvey(title, description string, optionTexts []string) (*
 	}
 	now := time.Now().UTC()
 	sv := &Survey{
-		ID:           newID(10),
+		ID:           newID(surveyIDLen),
 		Type:         TypeThumbsUp,
 		Title:        title,
 		Description:  strings.TrimSpace(description),
@@ -496,3 +496,8 @@ const MaxOptionText = 200
 // thinking about. The upsert below is also scoped to the owning survey, so even
 // a collision cannot reach across surveys.
 const optionIDLen = 12
+
+// surveyIDLen is 10 characters of the same 32-symbol alphabet: 50 bits, which
+// is what makes /s/{id} unguessable enough to be the only thing protecting a
+// survey a respondent was sent a link to.
+const surveyIDLen = 10

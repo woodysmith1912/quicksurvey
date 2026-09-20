@@ -127,9 +127,35 @@ const (
 // cap exists so an anonymous caller cannot choose how much memory a POST costs.
 const MaxBody = 64 << 10
 
+// MaxUpload bounds the one request that carries a file rather than a form: a
+// restored survey, which is as large as the responses in it. Still a cap, and
+// only reachable by an editor who is signed in.
+//
+// A full backup runs to roughly 200 bytes per response, so this is tens of
+// thousands of them — far past anything this application is for, which is the
+// point: the limit should never be the thing someone hits.
+const MaxUpload = 8 << 20
+
+// restorePath is named because two places have to agree on it: the route, and
+// the body limit above.
+const restorePath = "/admin/surveys/restore"
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost || r.Method == http.MethodPut {
-		r.Body = http.MaxBytesReader(w, r.Body, MaxBody)
+		limit := int64(MaxBody)
+		if r.URL.Path == restorePath {
+			limit = MaxUpload
+			// Checked up front as well as capped, because the CSRF token is
+			// read out of the same multipart body: once the read is cut short
+			// the token is unreadable too, and an oversized upload would be
+			// reported as an expired session.
+			if r.ContentLength > limit {
+				s.fail(w, r, http.StatusRequestEntityTooLarge,
+					fmt.Errorf("that file is larger than %d MB", limit>>20))
+				return
+			}
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 	}
 	if s.cfg.RedirectHTTPS && !s.isHTTPS(r) {
 		// 308 rather than 302: the method and body must survive, or a POSTed
@@ -217,6 +243,8 @@ func (s *Server) routes() {
 
 	// Authoring and moderation: editors and admins.
 	m.Handle("POST /admin/surveys", s.requireRole(store.RoleEditor, s.handleCreateSurvey))
+	m.Handle("GET /admin/s/{id}/save/{kind}", s.requireRole(store.RoleEditor, s.handleSaveSurvey))
+	m.Handle("POST "+restorePath, s.requireRole(store.RoleEditor, s.handleRestoreSurvey))
 	m.Handle("GET /admin/s/{id}/edit", s.requireRole(store.RoleEditor, s.handleEditForm))
 	m.Handle("POST /admin/s/{id}/edit", s.requireRole(store.RoleEditor, s.handleEditSave))
 	m.Handle("POST /admin/s/{id}/state", s.requireRole(store.RoleEditor, s.handleSetState))
@@ -248,12 +276,7 @@ func (s *Server) parseTemplates() error {
 		"canEdit": func(u *store.User) bool { return u != nil && u.Role.AtLeast(store.RoleEditor) },
 		"isAdmin": func(u *store.User) bool { return u != nil && u.Role == store.RoleAdmin },
 		"bar":     func(f float64) template.CSS { return template.CSS(fmt.Sprintf("width:%.1f%%", f)) },
-		"plural": func(n int, one, many string) string {
-			if n == 1 {
-				return one
-			}
-			return many
-		},
+		"plural":  plural,
 	}
 	// Files named with a leading underscore are shared fragments rather than
 	// pages, and are parsed into every page.
