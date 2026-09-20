@@ -413,3 +413,163 @@ func TestFormulaInjectionIsNeutralised(t *testing.T) {
 		t.Error("the comment should be preserved, prefixed with an apostrophe")
 	}
 }
+
+// The seen set has to be resolved through merge pointers just as the choices
+// are. The case that needs it: a respondent shown a duplicate, who never saw
+// the option it was later merged into. Resolving the duplicate says they were
+// shown the target in effect, so its cell is 0 (shown, not picked) rather
+// than blank (never on their ballot) -- and a blank would understate the
+// column's COUNT, which is exactly what "how many were shown it" reads from.
+func TestTheSeenSetIsResolvedThroughMergesLikeTheChoicesAre(t *testing.T) {
+	s, sv := fixture(t)
+	v1, v2 := "v1", "v2"
+	if _, err := s.SaveResponse(sv.ID, v1, []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveResponse(sv.ID, v2, []string{sv.Options[1].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// v1 proposes a duplicate. Only v1 is shown it, and AddWriteIn records
+	// their vote for it.
+	dup, err := s.AddWriteIn(sv.ID, v1, "Climbing (dup)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sv, err = s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		return store.SetOptionStatus(d, dup, store.OptApproved, "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// v1 changes their mind and drops it, so it stays in their seen set but
+	// leaves their choices.
+	if _, err := s.SaveResponse(sv.ID, v1, []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// v2 proposes the option the duplicate will be merged into. It is pending,
+	// so v1 -- who does not submit again -- is never shown it directly.
+	target, err := s.AddWriteIn(sv.ID, v2, "Indoor climbing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sv, err = s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		return store.SetOptionStatus(d, target, store.OptApproved, "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if sv, err = s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		return store.SetOptionStatus(d, dup, store.OptMerged, target)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	responses := s.Responses(sv.ID)
+	var first *store.Response
+	for _, r := range responses {
+		if r.Voter == v1 {
+			first = r
+		}
+	}
+	if first == nil {
+		t.Fatal("no response for v1")
+	}
+	if slicesContains(first.Seen, target) {
+		t.Fatalf("test setup is wrong: v1 was shown the merge target directly, " +
+			"so the export needs no resolution to answer correctly")
+	}
+	if !slicesContains(first.Seen, dup) {
+		t.Fatalf("test setup is wrong: v1 was never shown the duplicate")
+	}
+
+	var b strings.Builder
+	if err := Responses(&b, sv, responses, time.UTC); err != nil {
+		t.Fatal(err)
+	}
+	rows := grid(b.String())
+	head := rows[0]
+	col := -1
+	for i, h := range head {
+		if h == "Indoor climbing" {
+			col = i
+		}
+	}
+	if col < 0 {
+		t.Fatalf("no column for the merge target: %v", head)
+	}
+	var row []string
+	for _, r := range rows[1:] {
+		if r[0] == first.ID {
+			row = r
+		}
+	}
+	if row == nil {
+		t.Fatalf("no export row for v1")
+	}
+	if row[col] == "" {
+		t.Errorf("the merge target's cell is blank for a respondent who was shown the "+
+			"duplicate it absorbed; the seen set was not resolved through the merge: %v", row)
+	}
+}
+
+func slicesContains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+// An option nobody was shown has no cohort, so there is no share of it to
+// report. The interface renders an em-dash rather than 0%, because "0%" reads
+// as "nobody wanted it"; the spreadsheet has to agree, and a blank keeps
+// AVERAGE honest where a 0.0 would drag it down.
+func TestSummaryLeavesInterestBlankForAnOptionNobodyWasShown(t *testing.T) {
+	s, sv := fixture(t)
+	// An option added after everyone answered was shown to nobody.
+	sv, err := s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		_, err := store.AddOption(d, "Brand new", store.OptApproved, "editor")
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, respondents := s.Tally(sv.ID)
+
+	var b strings.Builder
+	if err := Summary(&b, sv, results, respondents); err != nil {
+		t.Fatal(err)
+	}
+	rows := grid(b.String())
+	head := rows[0]
+	shownCol, interestCol := -1, -1
+	for i, h := range head {
+		switch h {
+		case "shown_to":
+			shownCol = i
+		case "percent_of_shown":
+			interestCol = i
+		}
+	}
+	if shownCol < 0 || interestCol < 0 {
+		t.Fatalf("missing exposure columns: %v", head)
+	}
+	var checked bool
+	for _, r := range rows[1:] {
+		if r[0] != "Brand new" {
+			continue
+		}
+		checked = true
+		if r[shownCol] != "0" {
+			t.Errorf("shown_to = %q, want 0 for an option added after everyone answered", r[shownCol])
+		}
+		if r[interestCol] != "" {
+			t.Errorf("percent_of_shown = %q, want blank — there is no share of an empty cohort, "+
+				"and the interface deliberately renders an em-dash here", r[interestCol])
+		}
+	}
+	if !checked {
+		t.Fatal("the new option did not appear in the summary")
+	}
+}

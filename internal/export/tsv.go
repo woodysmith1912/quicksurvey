@@ -85,17 +85,41 @@ func header(o store.Option) string {
 // up after a bounded walk and returns an ID whose option is still merged, and
 // merged options never become columns (see the loop that builds cols below),
 // so such a value matches nothing.
-func resolvedSets(sv *store.Survey, r *store.Response) (chosen, seen map[string]bool) {
+func resolvedSets(resolve map[string]string, r *store.Response) (chosen, seen map[string]bool) {
 	chosen, seen = make(map[string]bool, len(r.Choices)), make(map[string]bool, len(r.Seen))
 	for _, id := range r.Choices {
-		resolved, _ := sv.Resolve(id)
-		chosen[resolved] = true
+		chosen[resolveVia(resolve, id)] = true
 	}
 	for _, id := range r.Seen {
-		resolved, _ := sv.Resolve(id)
-		seen[resolved] = true
+		seen[resolveVia(resolve, id)] = true
 	}
 	return chosen, seen
+}
+
+// resolveMap resolves every option in the survey through its merge chain once,
+// so the per-response work is a map lookup rather than sv.Resolve's linear
+// scan of sv.Options.
+//
+// This is what keeps the export linear in the option count. r.Seen is roughly
+// as long as sv.Options -- that is what a seen set is -- so resolving each
+// entry with a scan made the per-response cost O(options^2), and at a hundred
+// options that scan was most of the export's runtime.
+func resolveMap(sv *store.Survey) map[string]string {
+	m := make(map[string]string, len(sv.Options))
+	for _, o := range sv.Options {
+		resolved, _ := sv.Resolve(o.ID)
+		m[o.ID] = resolved
+	}
+	return m
+}
+
+// resolveVia matches sv.Resolve's contract for an ID the survey does not
+// contain: it resolves to itself, and so matches no column.
+func resolveVia(resolve map[string]string, id string) string {
+	if to, ok := resolve[id]; ok {
+		return to
+	}
+	return id
 }
 
 // Responses writes the wide, one-row-per-response table: a column per option
@@ -108,7 +132,9 @@ func resolvedSets(sv *store.Survey, r *store.Response) (chosen, seen map[string]
 // against a column, so a respondent whose only pick was later merged away
 // still shows 1 under the option it became. selections counts each resolved
 // column at most once, so two duplicates picked and merged into the same
-// option count as one selection — matching how Summary tallies votes.
+// option count as one selection. Note it is not the same figure Summary
+// reports: Summary is fed the tally, which counts approved options only,
+// while these columns include pending, rejected and removed ones.
 func Responses(w io.Writer, sv *store.Survey, responses []*store.Response, loc *time.Location) error {
 	bw := bufio.NewWriter(w)
 
@@ -128,9 +154,10 @@ func Responses(w io.Writer, sv *store.Survey, responses []*store.Response, loc *
 		return err
 	}
 
+	resolve := resolveMap(sv)
 	for _, r := range responses {
 		rec := []string{r.ID, r.Created.In(loc).Format(time.RFC3339), r.Updated.In(loc).Format(time.RFC3339)}
-		chosen, seen := resolvedSets(sv, r)
+		chosen, seen := resolvedSets(resolve, r)
 		n := 0
 		for _, o := range cols {
 			switch {
@@ -164,9 +191,17 @@ func Summary(w io.Writer, sv *store.Survey, results []store.Result, respondents 
 		return err
 	}
 	for _, res := range results {
+		// Blank, not 0.0, when nobody was shown the option: there is no
+		// share of an empty cohort, and "0.0" reads as "nobody wanted it".
+		// The interface refuses to print it for the same reason, and a
+		// spreadsheet ignores a blank in AVERAGE rather than dragging it to
+		// zero.
+		interest := ""
+		if res.Shown > 0 {
+			interest = fmt.Sprintf("%.1f", res.ShownPercent)
+		}
 		if err := row(bw, textCell(res.Option.Text), fmt.Sprint(res.Votes), fmt.Sprint(respondents),
-			fmt.Sprintf("%.1f", res.Percent), fmt.Sprint(res.Shown),
-			fmt.Sprintf("%.1f", res.ShownPercent)); err != nil {
+			fmt.Sprintf("%.1f", res.Percent), fmt.Sprint(res.Shown), interest); err != nil {
 			return err
 		}
 	}
