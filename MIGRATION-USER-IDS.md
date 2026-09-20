@@ -190,7 +190,7 @@ user-visible effect of the change.
 | `internal/store/reset.go` | `resetColumns:43`, the two `WHERE user_name` queries at `:85` and `:187` |
 | `internal/store/invite.go` | `inviteColumns:55`, `claimed_by` at `:167` and `:223` |
 | `internal/web/auth.go` | session cookie body and lookup, `:75-100` |
-| `internal/web/admin.go` | the accounts page and the reset-link path at `:396-403` |
+| `internal/web/admin.go` | the accounts page and the reset-link path at `:468-475` |
 | `internal/web/invite.go` | the `invited_by` log line at `:61` |
 
 `User.InvitedBy`, `Invite.CreatedBy`, `Invite.ClaimedBy` and `Reset.CreatedBy`
@@ -223,7 +223,7 @@ Then assert `PRAGMA foreign_key_check` returns nothing, and that a second
 ## Rehearsal and rollback
 
 **Rehearsal.** `quicksurvey backup -to -` streams a consistent copy out of the
-distroless container (`deploy/k8s/README.md:156`):
+distroless container (`deploy/k8s/README.md:161`):
 
 ```
 kubectl -n quicksurvey exec quicksurvey-0 -- quicksurvey backup -to - > prod-copy.db

@@ -186,7 +186,7 @@ Note what the group ladder does **not** have: any notion of a role on a single
 survey. A group survey viewer reads everything in the group. Per-survey grants
 are deliberately deferred — see [What I am not proposing](#what-i-am-not-proposing).
 
-Every one of the 15 `requireRole` call sites in `internal/web/server.go:209-229`
+Every one of the 17 `requireRole` call sites in `internal/web/server.go:235-257`
 has to say which ladder it means. That is mechanical but it is where mistakes
 will hide, so the helper should be split into two obviously different names
 rather than one function with a flag.
@@ -200,7 +200,7 @@ it. That much needs no special case.
 What does need one is the other direction — a sysop must not be able to reach
 *through* an owner's account. And that exception is broader than it first
 looks. Today `POST /admin/users` with action `reset-link`
-(`internal/web/admin.go:396-403`) is gated on `RoleAdmin` alone and mints a
+(`internal/web/admin.go:468-475`) is gated on `RoleAdmin` alone and mints a
 reset link for any named account, handing it straight to the caller. A sysop
 points that at the system owner, uses the link, signs in as the owner, and the
 ownership rule above is worth nothing. Session revocation and role change are
