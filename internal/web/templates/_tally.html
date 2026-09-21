@@ -1,18 +1,33 @@
 {{define "tally"}}
-<p class="hint" data-testid="respondents">{{.Voters}} {{plural .Voters "person has" "people have"}} responded.
-  Someone can pick more than one option, so the shares do not add up to 100%.</p>
+{{$d := .Data}}
+{{/* Shown and Interest are cohort sizes. On a survey with few respondents, or
+     for an option approved after people had already answered, a cohort of one
+     states a single respondent's ballot entry as a percentage — so they are
+     shown only to signed-in accounts, who are permissioned readers, and never
+     on the public ballot or results page. */}}
+{{$exposure := .User}}
+<p class="hint" data-testid="respondents">{{$d.Voters}} {{plural $d.Voters "person has" "people have"}} responded.
+  Someone can pick more than one option, so the shares do not add up to 100%.
+  {{if $exposure}}An option added after some people had already answered was shown to fewer of them;
+  "Interest" is the share of those who saw it.{{end}}</p>
 <table data-testid="tally">
-  <thead><tr><th>Option</th><th class="num">Votes</th><th class="num">Share</th><th></th></tr></thead>
+  <thead><tr><th>Option</th><th class="num">Votes</th><th class="num">Share</th>
+    {{if $exposure}}<th class="num">Shown to</th><th class="num">Interest</th>{{end}}
+    <th class="barcol"></th></tr></thead>
   <tbody>
-  {{range .Results}}
+  {{range $d.Results}}
     <tr data-testid="tally-row" data-option="{{.Option.Text}}">
       <td>{{.Option.Text}}</td>
       <td class="num" data-testid="votes">{{.Votes}}</td>
       <td class="num">{{pct .Percent}}</td>
-      <td><progress class="bar" value="{{.Votes}}" max="{{if $.Voters}}{{$.Voters}}{{else}}1{{end}}"></progress></td>
+      {{if $exposure}}
+      <td class="num" data-testid="shown">{{.Shown}}</td>
+      <td class="num" data-testid="interest">{{if .Shown}}{{pct .ShownPercent}}{{else}}&mdash;{{end}}</td>
+      {{end}}
+      <td class="barcol"><progress class="bar" value="{{.Votes}}" max="{{if $d.Voters}}{{$d.Voters}}{{else}}1{{end}}"></progress></td>
     </tr>
   {{else}}
-    <tr><td colspan="4" class="muted">No options to show yet.</td></tr>
+    <tr><td colspan="{{if $exposure}}6{{else}}4{{end}}" class="muted">No options to show yet.</td></tr>
   {{end}}
   </tbody>
 </table>

@@ -40,7 +40,7 @@
 </div>
 
 <h2>Results</h2>
-{{template "tally" $d}}
+{{template "tally" .}}
 <p class="row">
   <a class="btn" href="/admin/s/{{$d.Survey.ID}}/export/responses.tsv" data-testid="export-responses">Download responses (TSV)</a>
   <a class="btn" href="/admin/s/{{$d.Survey.ID}}/export/summary.tsv" data-testid="export-summary">Download summary (TSV)</a>

@@ -108,18 +108,28 @@ connection, 272µs at four, a 2.2x difference for a one-line change.
 Four rather than more because sixteen measured *worse* than four, at 328µs. Past
 the point where readers overlap, extra connections buy nothing and cost
 scheduling. Writes still serialise, which is correct, and `_txlock=immediate`
-with `busy_timeout` is what makes that a wait rather than an error.
+with `busy_timeout` is what makes that a wait rather than an error. Both
+figures predate `seen`, and four still measures best after it.
 
 ### What the benchmark actually found
+
+The table below, and the `Tally` caching figures further down, were also
+measured before the `seen` set existed. The comparisons they were measured to
+show — four connections beating one, and caching keeping that cost off the
+ballot path — still hold; a heavier per-response read does not change which
+side of either ratio wins.
 
 | | fresh ballot | ~10 selected | +1,000 other respondents | + results shown |
 |---|---|---|---|---|
 | 1 connection | 611µs | 651µs | 653µs | 16.3ms |
 | 4 connections | 272µs | 292µs | 283µs | 4.85ms |
 
-Loading a respondent's existing answer costs about 40µs — the response and its
-choices are two indexed lookups, and the number of prior respondents does not
-enter into them.
+Loading a respondent's existing answer was measured at about 40µs before the
+`seen` set existed, when the response and its choices were two indexed
+lookups and the number of prior respondents entered into neither.
+`loadResponse` now issues a third indexed lookup, for `seen`, so that cost is
+somewhat higher; it remains independent of how many other people have
+responded.
 
 Showing results to respondents used to cost 25x, because `Tally` walked every
 response on every ballot load. It is now cached, keyed on a counter that every
@@ -127,8 +137,11 @@ committed write bumps, which took that case from 4,851µs to 359µs. See below.
 
 ### At realistic scale
 
-Against a seeded database of 10,000 surveys, 99,853 options, 75,173 responses
-and 250,790 choices — 50.8MB:
+Measured before the `seen` set existed, against a seeded database of 10,000
+surveys, 99,853 options, 75,173 responses and 250,790 choices — 50.8MB. That
+fixture predates this feature and was not rebuilt for it; `seen` adds roughly
+one row per option per respondent who has submitted, several times the choice
+count, so a database seeded today would hold more rows and a larger file:
 
 | | ns/op | requests/s |
 |---|---|---|
@@ -239,6 +252,45 @@ A respondent's vote for their own pending write-in is recorded immediately and
 starts counting the moment a moderator approves it — they do not have to come
 back.
 
+### Who was shown what
+
+An option approved halfway through a survey has been on fewer ballots than the
+rest, so its vote count and its share of respondents both under-read. The
+tally therefore also reports, per option, how many respondents were **shown**
+it and votes as a share of that.
+
+"Shown" is recorded at submission, not on page view: `seen` is a child table
+of `responses` with the same shape as `choices`, written in the same
+transaction, holding every option that was visible to that respondent. The
+visibility rule — approved options plus their own pending write-ins — has one
+definition, `visibleTo`, shared by choice filtering, carry-forward and the
+seen set. The set is unioned across a respondent's submissions and never
+shrinks, so an option removed and restored keeps its denominator.
+
+Recording on submit rather than on view was deliberate. A write per page load
+would invalidate the tally cache on every ballot view, exactly where it earns
+its keep; it would count crawlers, link unfurlers and people who looked and
+left; and it would store rows for voter identities that never respond. The
+denominator this produces is a subset of the existing respondent count, so
+the two shares are comparable, and `Votes <= Shown <= respondents` holds for
+every option.
+
+Exposures resolve through merges and count once per respondent, the same way
+votes do. Responses recorded before the table existed were backfilled once,
+under a `meta` key so the backfill cannot run again and mark later options as
+shown to people who answered before they existed. For approved, removed, and
+merged options the backfill makes the same assumption the old share already
+did: everyone who answered saw them, since they were on the ballot (or, for a
+merged option, resolve to a target that was) whatever their status is now —
+removed is not narrowed, because an editor deleting an option later does not
+undo that it was once shown. Pending and rejected options get a narrower rule,
+because for them the truth is actually knowable: a pending write-in is
+visible only to its proposer, and a rejected one was only ever visible to its
+proposer before a moderator refused it, so the backfill marks each seen only
+by the response holding a recorded vote for it — which can only be that
+proposer. That also keeps `Votes <= Shown` intact, since a response with a
+vote for an option is always given a seen row for it too.
+
 ## Option order
 
 Respondents see the options shuffled, by default. Position bias is real — the
@@ -283,9 +335,23 @@ request.
 ## The tally cache
 
 `Tally` is called on every ballot load of a survey that shows results to
-respondents. Computing it walks every response and every choice, so it grew
-linearly with the survey while nothing else did: 16ms and 2.7MB per request at
-a thousand respondents, against 0.65ms and 123KB for the same page without.
+respondents. Computing it walks every response, every choice and every seen
+row, so it grows linearly with the survey while nothing else does. Before the
+`seen` set existed, when it walked only responses and choices, that was
+measured at 16ms and 2.7MB per request at a thousand respondents, against
+0.65ms and 123KB for the same page without. A seen set runs several times the
+size of a choice set — roughly 4x the rows, in the shape this benchmark uses
+(30 options, about 10 selected) — so both figures are higher now, by a factor
+of about three in time and in memory, and by more as the option count grows.
+That is the cost of the feature and it is why the tally is cached; the
+benchmarks are where the numbers live.
+
+Two consequences worth recording as decisions rather than measurements. The
+cache's one global generation counter was a fair trade when a miss was cheap
+and is a worse one now, so keying it per survey is the next thing to do if
+misses start to matter. And the ballot page deliberately does not pay any of
+this: `loadResponse` takes a `withSeen` flag and the respondent path passes
+false, because nothing that page renders reads the set.
 
 It is cached now, and the interesting part is the invalidation. Every write that
 can change a tally — a response, a moderation decision, a merge, publishing,
@@ -376,6 +442,47 @@ the same as one matching nothing, and the difference has to be audible.
 schema and opens it, and `TestEveryQueriedColumnExistsAfterMigration` runs every
 query the application issues. Both fail if a future column is added to the
 schema text and not to `addedColumns`.
+
+`backfillSeen` gives every pre-existing response a seen set exactly once,
+gated by the `seen_backfilled` meta key. That guard opens a narrow rollback
+hazard: an operator who upgrades, serves responses, and then rolls back to a
+binary that predates `seen` gets no seen rows for anything recorded on that
+older binary, since it never writes to the table at all. Rolling forward
+again does not repair the gap — the guard key is already set, so
+`backfillSeen` will not run a second time. Those responses keep their votes
+but carry no recorded exposure, which understates the Interest figure for the
+options involved, silently.
+
+The obvious fix, backfilling any response with no seen rows, is wrong: a
+respondent can genuinely submit with nothing visible to them, and treating
+that as a missed backfill would relabel a real zero as "saw everything" — the
+same corruption the guard exists to prevent. In practice the window only
+opens if someone deliberately downgrades and keeps serving: this is a
+single-replica, self-hosted application, and nothing about an ordinary
+upgrade would open it on its own.
+
+Restoring a backup written before `seen` existed has the same gap, arrived at
+differently, and it is worth being explicit that the two routes disagree. The
+restore seeds the seen set from each response's choices and nothing else,
+because that is the only exposure the document actually records. An in-place
+upgrade is more generous: it marks every option that was on the ballot as seen
+by everyone who answered. So the same pre-`seen` data reports honest Interest
+if the database was upgraded and optimistic Interest if it was restored, and
+nothing afterwards can tell which happened.
+
+Copying the backfill's rule into the restore was tried and reverted. As written
+it could not distinguish a document that predates `seen` from one faithfully
+recording a respondent who saw nothing: an empty set and an absent one are the
+same bytes, so it corrupted good backups to improve stale ones.
+`Document.Version` would in fact tell those apart and the restore could branch
+on it — the reason it does not is that the rule was also unbounded in memory
+(below), and that a document old enough to need the guess can only come from an
+operator running an untagged build, since no released version writes documents
+at all. Guessing less costs a case nobody can reach.
+It also built an exposure list per response for options the upload never
+mentioned, which turned a small file into enough allocation to exhaust the
+container. Guessing less is the better trade: the restore claims only what the
+document says, and this paragraph is the record of what that costs.
 
 ## Invitations and approval
 

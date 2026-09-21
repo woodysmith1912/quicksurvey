@@ -2,8 +2,11 @@ package store
 
 import (
 	"bytes"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // approvedTexts returns a survey's approved option texts, in ballot order.
@@ -398,5 +401,304 @@ func TestDefinitionDocumentCarriesNoIdentifiersAtAll(t *testing.T) {
 	}
 	if got.ID == sv.ID {
 		t.Error("a definition restore reused the original survey ID")
+	}
+}
+
+// A full backup has to carry the seen set, not just the choices. Shown is
+// derived from it, the tally asserts Votes <= Shown <= respondents, and
+// backfillSeen cannot repair a restored survey because the meta guard is
+// already set on any database old enough to restore into. Without this the
+// round trip silently turns "shown to 3" into "shown to 0" beside unchanged
+// vote counts.
+func TestFullBackupCarriesTheSeenSetSoTheTallyInvariantSurvives(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Tacos", "Ramen")
+	for _, who := range []string{"a", "b", "c"} {
+		v := s.VoterID(sv.ID, who)
+		if _, err := s.SaveResponse(sv.ID, v, []string{sv.Options[0].ID}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := shownByText(t, s, sv.ID)
+	if before["Tacos"] != 3 || before["Ramen"] != 3 {
+		t.Fatalf("precondition: shown = %v, want both options shown to 3", before)
+	}
+	checkTallyInvariant(t, s, sv.ID)
+
+	var buf bytes.Buffer
+	if err := s.WriteSurveyDocument(&buf, sv.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSurvey(sv.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ReadSurveyDocument(bytes.NewReader(buf.Bytes()), true)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	after := shownByText(t, s, got.ID)
+	if after["Tacos"] != 3 || after["Ramen"] != 3 {
+		t.Errorf("shown after restore = %v, want %v — the seen set did not survive", after, before)
+	}
+	checkTallyInvariant(t, s, got.ID)
+
+	results, _ := s.Tally(got.ID)
+	for _, r := range results {
+		if r.Votes > 0 && r.Shown == 0 {
+			t.Errorf("%s: %d votes but shown to nobody", r.Option.Text, r.Votes)
+		}
+	}
+}
+
+// A document written before seen existed carries choices and no seen. The
+// restore seeds the seen set from the choices and nothing more: every chosen
+// option was on that ballot by definition, which is the only thing the
+// document actually says.
+//
+// This pins the known limitation as well as the behaviour. An in-place
+// upgrade of the same data would mark every non-pending option as seen by
+// everyone, so a restored pre-seen backup reports a smaller denominator and
+// therefore optimistic interest. An earlier version of this code copied the
+// backfill's rule to close that gap and could not tell a pre-seen document
+// from one recording a respondent who genuinely saw nothing -- so it
+// corrupted faithful backups, and materialised enough strings to exhaust the
+// container from a small upload. The gap is the better trade.
+func TestRestoringADocumentWithoutSeenSeedsOnlyFromTheChoices(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Tacos", "Ramen")
+	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := s.WriteSurveyDocument(&buf, sv.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	// Strip the seen arrays, as a pre-feature backup would have them.
+	stripped := regexp.MustCompile(`"seen": \[[^]]*\],`).ReplaceAllString(buf.String(), "")
+	if strings.Contains(stripped, `"seen"`) {
+		t.Fatalf("test setup did not strip the seen arrays")
+	}
+	if err := s.DeleteSurvey(sv.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.ReadSurveyDocument(strings.NewReader(stripped), true)
+	if err != nil {
+		t.Fatalf("a document without seen must still restore: %v", err)
+	}
+
+	checkTallyInvariant(t, s, got.ID)
+	shown := shownByText(t, s, got.ID)
+	if shown["Tacos"] != 1 {
+		t.Errorf("the chosen option shows %d, want 1 — seen was not seeded from the choices",
+			shown["Tacos"])
+	}
+	// The limitation, asserted rather than only described: an option nobody
+	// picked comes back with no exposures, where an in-place upgrade would
+	// have given it one. If this ever reads 1, the blanket rule is back and
+	// the defects that came with it need re-checking.
+	if shown["Ramen"] != 0 {
+		t.Errorf("the unchosen option shows %d, want 0 — the restore should claim only what "+
+			"the document says, not what an in-place backfill would have guessed", shown["Ramen"])
+	}
+}
+
+// The choices union is what keeps Votes <= Shown true for a document whose
+// seen set is incomplete. Every round-trip test uses documents where seen
+// already contains the choices, so the union is a no-op in all of them and
+// nothing noticed when it was absent.
+func TestRestoringAPartialSeenSetStillCannotReportMoreVotesThanExposures(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Tacos", "Ramen")
+	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"),
+		[]string{sv.Options[0].ID, sv.Options[1].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := s.SurveyDocument(sv.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Responses) != 1 || len(doc.Responses[0].Seen) != 2 {
+		t.Fatalf("precondition: want one response shown both options, got %+v", doc.Responses)
+	}
+	// A hand-edited or third-party document: seen omits an option that was
+	// nonetheless chosen. Chosen by option text rather than by position --
+	// the seen set is read back with no ORDER BY, so indexing into it picks
+	// whichever id happens to sort second and the assertion below would be
+	// satisfied by luck as often as by the code under test.
+	var tacos, ramen string
+	for _, o := range doc.Survey.Options {
+		switch o.Text {
+		case "Tacos":
+			tacos = o.ID
+		case "Ramen":
+			ramen = o.ID
+		}
+	}
+	if tacos == "" || ramen == "" {
+		t.Fatalf("test setup: could not find both options in the document")
+	}
+	doc.Responses[0].Seen = []string{ramen}
+	_ = tacos
+	if err := s.DeleteSurvey(sv.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.RestoreSurvey(doc, true)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	checkTallyInvariant(t, s, got.ID)
+	if shown := shownByText(t, s, got.ID); shown["Tacos"] != 1 {
+		t.Errorf("Tacos shown %d with a vote recorded; the choices union did not run: %v",
+			shown["Tacos"], shown)
+	}
+}
+
+// An option with no text cannot be restored, and restoring the rest would
+// leave every response that names it pointing at nothing. Refusing the
+// document is what lets both reference checks below be strict and their
+// errors be accurate.
+func TestADocumentWithAnUnrestorableOptionIsRefusedWholesale(t *testing.T) {
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Tacos", "Ramen")
+	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := s.SurveyDocument(sv.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc.Survey.Options[1].Text = "   "
+	if err := s.DeleteSurvey(sv.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.RestoreSurvey(doc, true)
+	if err == nil {
+		t.Fatal("a document carrying an option with no text was restored; the responses " +
+			"naming that option would silently lose an exposure")
+	}
+	if !strings.Contains(err.Error(), "no text") {
+		t.Errorf("error = %q, want it to name the option that cannot be restored", err)
+	}
+}
+
+// A newer document is full of fields this build does not know, so the version
+// has to be read before the strict decode or the error blames a field when
+// the real problem is the version. This is the case that distinguishes them;
+// a newer document with no unknown fields passes either way.
+func TestANewerDocumentReportsItsVersionRatherThanItsFields(t *testing.T) {
+	s := newStore(t)
+	_, err := s.ReadSurveyDocument(strings.NewReader(
+		`{"format":"quicksurvey.survey","version":99,"tenant":"acme","survey":{"title":"T"}}`), false)
+	if err == nil {
+		t.Fatal("a document from a newer quicksurvey was accepted")
+	}
+	if !strings.Contains(err.Error(), "understands up to") {
+		t.Errorf("error = %q, want the version explained rather than a field named", err)
+	}
+}
+
+// A document declaring no version would otherwise be treated as current.
+func TestADocumentWithNoVersionIsRefused(t *testing.T) {
+	s := newStore(t)
+	_, err := s.ReadSurveyDocument(strings.NewReader(
+		`{"format":"quicksurvey.survey","survey":{"title":"T"}}`), false)
+	if err == nil {
+		t.Fatal("a document declaring no version was accepted as current")
+	}
+	if !strings.Contains(err.Error(), "no version") {
+		t.Errorf("error = %q, want it to say the version is missing", err)
+	}
+}
+
+// A seen set larger than SQLite's bind-variable ceiling has to be written in
+// batches. At two variables per row the hard limit is 16383, and a statement
+// that reaches it fails with a raw driver string -- on the restore path, that
+// means a backup that cannot be restored at all.
+func TestASeenSetLargerThanOneStatementStillRestores(t *testing.T) {
+	const n = 20000 // comfortably past 32766/2
+	s := newStore(t)
+
+	opts := make([]DocumentOption, n)
+	ids := make([]string, n)
+	for i := range opts {
+		ids[i] = fmt.Sprintf("o%05d", i)
+		opts[i] = DocumentOption{ID: ids[i], Text: fmt.Sprintf("Option %d", i), Status: OptApproved}
+	}
+	doc := &Document{
+		Format: docFormat, Version: docVersion, SourceID: "bigsurvey",
+		Survey: DocumentBody{
+			Type: TypeThumbsUp, Title: "Big", State: StateOpen, Options: opts,
+			Created: time.Now().UTC(), Updated: time.Now().UTC(),
+			FirstOpenedAt: time.Now().UTC(),
+		},
+		Responses: []DocumentResponse{{
+			Voter:   "v1",
+			Choices: []string{ids[0]},
+			Seen:    ids,
+			Created: time.Now().UTC(), Updated: time.Now().UTC(),
+		}},
+	}
+
+	got, err := s.RestoreSurvey(doc, true)
+	if err != nil {
+		t.Fatalf("restoring a response shown %d options failed: %v", n, err)
+	}
+	var seen int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM seen sn JOIN responses r ON r.id = sn.response_id
+		 WHERE r.survey_id = ?`, got.ID).Scan(&seen); err != nil {
+		t.Fatal(err)
+	}
+	if seen != n {
+		t.Errorf("%d seen rows stored, want %d — the batched insert lost rows", seen, n)
+	}
+}
+
+// Both reference checks are strict, and neither strictness was pinned: a
+// document naming an option it does not carry is malformed, and restoring it
+// would silently drop a vote or an exposure.
+func TestADocumentNamingAnOptionItDoesNotCarryIsRefused(t *testing.T) {
+	build := func(mangle func(*DocumentResponse)) *Document {
+		r := DocumentResponse{
+			Voter:   "v1",
+			Choices: []string{"o1"},
+			Seen:    []string{"o1"},
+			Created: time.Now().UTC(), Updated: time.Now().UTC(),
+		}
+		mangle(&r)
+		return &Document{
+			Format: docFormat, Version: docVersion, SourceID: "src",
+			Survey: DocumentBody{
+				Type: TypeThumbsUp, Title: "T", State: StateOpen,
+				Options: []DocumentOption{{ID: "o1", Text: "Tacos", Status: OptApproved}},
+				Created: time.Now().UTC(), Updated: time.Now().UTC(),
+				FirstOpenedAt: time.Now().UTC(),
+			},
+			Responses: []DocumentResponse{r},
+		}
+	}
+	for _, c := range []struct {
+		name, want string
+		mangle     func(*DocumentResponse)
+	}{
+		{"a chosen option", "chose option", func(r *DocumentResponse) {
+			r.Choices = append(r.Choices, "ghost")
+		}},
+		{"a seen option", "was shown option", func(r *DocumentResponse) {
+			r.Seen = append(r.Seen, "ghost")
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newStore(t)
+			_, err := s.RestoreSurvey(build(c.mangle), true)
+			if err == nil {
+				t.Fatal("a document naming an option it does not carry was restored; the " +
+					"reference would point at nothing")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error = %q, want it to name what the response referenced", err)
+			}
+		})
 	}
 }

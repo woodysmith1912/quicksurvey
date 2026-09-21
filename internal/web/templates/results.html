@@ -2,6 +2,6 @@
 {{$d := .Data}}
 <h1>{{$d.Survey.Title}}</h1>
 <h2>Results</h2>
-{{template "tally" $d}}
+{{template "tally" .}}
 <p><a href="/s/{{$d.Survey.ID}}">Back to the survey</a></p>
 {{end}}

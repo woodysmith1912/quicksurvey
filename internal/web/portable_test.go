@@ -173,7 +173,11 @@ func TestRestoreRefusesWhatWouldGoWrongAndSaysWhy(t *testing.T) {
 	cases := []struct{ name, content, keepID, want string }{
 		{"responses without the original link", full, "", "answered twice"},
 		{"onto a link already in use", full, "1", "already exists"},
-		{"a file that is not a survey", `{"hello":"world"}`, "", "unknown field"},
+		{"a file that is not a survey", `{"hello":"world"}`, "", "not a quicksurvey survey document"},
+		{"a survey document with a field we do not know", `{"format":"quicksurvey.survey","version":1,` +
+			`"survey":{"title":"T","weighting":"borda"}}`, "", "unknown field"},
+		{"a document from a newer quicksurvey", `{"format":"quicksurvey.survey","version":99,` +
+			`"survey":{"title":"T"}}`, "", "understands up to"},
 		{"a file that is not JSON", "not json at all", "", "reading survey document"},
 	}
 	for _, c := range cases {
@@ -236,5 +240,60 @@ func TestUnknownSaveKindIsNotFound(t *testing.T) {
 	b := h.editor()
 	if r := b.get("/admin/s/" + sv.ID + "/save/everything.json"); r.status != http.StatusNotFound {
 		t.Errorf("unknown save kind = %d, want 404", r.status)
+	}
+}
+
+// Shown and Interest are cohort sizes. A cohort of one — which happens
+// routinely the moment an editor approves a write-in — states a single
+// respondent's ballot entry as a percentage, so an anonymous reader of the
+// public results page must not see those columns. A signed-in account is a
+// permissioned reader and does.
+func TestExposureColumnsAreHiddenFromAnonymousReaders(t *testing.T) {
+	h := newHarness(t)
+	sv := h.seedSurvey("Tacos", "Ramen")
+	if _, err := h.st.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		d.ShowResults = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.st.SaveResponse(sv.ID, h.st.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	anon := h.browser()
+	for _, path := range []string{"/s/" + sv.ID + "/results", "/s/" + sv.ID} {
+		body := anon.get(path).body
+		if !strings.Contains(body, `data-testid="tally"`) {
+			t.Fatalf("%s: no tally rendered at all; the test is not exercising the page", path)
+		}
+		if strings.Contains(body, `data-testid="shown"`) || strings.Contains(body, `data-testid="interest"`) {
+			t.Errorf("%s: an anonymous reader can see the exposure columns", path)
+		}
+		if strings.Contains(body, "Shown to") || strings.Contains(body, "Interest") {
+			t.Errorf("%s: the exposure headings leak to an anonymous reader", path)
+		}
+	}
+
+	ed := h.editor()
+	body := ed.get("/admin/s/" + sv.ID).body
+	if !strings.Contains(body, `data-testid="shown"`) || !strings.Contains(body, `data-testid="interest"`) {
+		t.Error("a signed-in account should still see the exposure columns")
+	}
+
+	// The public pages must stay clean for a SIGNED-IN reader too. Today
+	// .User is nil there because only requireRole populates it, so the gate
+	// is really "an /admin/ route" rather than "a signed-in account" -- and
+	// the obvious future change, resolving the session on every route so a
+	// public page can show the nav bar, would silently re-expose cohort
+	// sizes. This is the case that would catch it.
+	for _, path := range []string{"/s/" + sv.ID + "/results", "/s/" + sv.ID} {
+		body := ed.get(path).body
+		if !strings.Contains(body, `data-testid="tally"`) {
+			t.Fatalf("%s: no tally rendered; the test is not exercising the page", path)
+		}
+		if strings.Contains(body, `data-testid="shown"`) || strings.Contains(body, `data-testid="interest"`) {
+			t.Errorf("%s: exposure columns render on a public page for a signed-in reader", path)
+		}
 	}
 }

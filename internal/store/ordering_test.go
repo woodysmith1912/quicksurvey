@@ -196,3 +196,68 @@ func TestVotingOnADeletedSurveyIsRefused(t *testing.T) {
 		t.Errorf("%d orphaned response rows", orphans)
 	}
 }
+
+// seen is the second child table of responses, so every route that destroys a
+// response has to take its exposures with it. The cascade does that today, but
+// nothing asserted it: a future insert that bypasses the foreign key, or a
+// schema edit that drops ON DELETE CASCADE, would leave rows pointing at
+// responses that no longer exist and quietly inflate every Shown count.
+func TestDestroyingResponsesTakesTheirSeenRowsWithThem(t *testing.T) {
+	countSeen := func(t *testing.T, s *Store, surveyID string) int {
+		t.Helper()
+		var n int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM seen sn JOIN responses r ON r.id = sn.response_id
+			 WHERE r.survey_id = ?`, surveyID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	orphanSeen := func(t *testing.T, s *Store) int {
+		t.Helper()
+		var n int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM seen sn
+			 WHERE NOT EXISTS (SELECT 1 FROM responses r WHERE r.id = sn.response_id)`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	t.Run("publishing discards the draft's preview responses", func(t *testing.T) {
+		s := newStore(t)
+		sv := draftSurvey(t, s, "Alpha", "Bravo")
+		if _, err := s.PreviewResponse(sv.ID, s.VoterID(sv.ID, "editor"), []string{sv.Options[0].ID}, ""); err != nil {
+			t.Fatal(err)
+		}
+		if countSeen(t, s, sv.ID) == 0 {
+			t.Fatal("precondition: the preview response recorded no exposures")
+		}
+		if _, err := s.Publish(sv.ID); err != nil {
+			t.Fatal(err)
+		}
+		if n := countSeen(t, s, sv.ID); n != 0 {
+			t.Errorf("%d seen rows survived the publish discard", n)
+		}
+		if n := orphanSeen(t, s); n != 0 {
+			t.Errorf("%d orphaned seen rows", n)
+		}
+	})
+
+	t.Run("deleting the survey", func(t *testing.T) {
+		s := newStore(t)
+		sv := mustSurvey(t, s, "Alpha", "Bravo")
+		if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
+			t.Fatal(err)
+		}
+		if countSeen(t, s, sv.ID) == 0 {
+			t.Fatal("precondition: no exposures recorded")
+		}
+		if err := s.DeleteSurvey(sv.ID); err != nil {
+			t.Fatal(err)
+		}
+		if n := orphanSeen(t, s); n != 0 {
+			t.Errorf("%d seen rows outlived the survey they belonged to", n)
+		}
+	})
+}

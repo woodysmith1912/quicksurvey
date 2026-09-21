@@ -82,11 +82,7 @@ func (s *Server) loadAdminSurvey(w http.ResponseWriter, r *http.Request) (*admin
 		Pending:   sv.PendingOptions(),
 		CanEdit:   userFrom(r.Context()).Role.AtLeast(store.RoleEditor),
 	}
-	for _, resp := range s.store.Responses(sv.ID) {
-		if resp.Comment != "" {
-			d.Comments = append(d.Comments, resp)
-		}
-	}
+	d.Comments = s.store.Comments(sv.ID)
 	for _, o := range sv.Options {
 		switch o.Status {
 		case store.OptApproved:
@@ -372,7 +368,7 @@ func (s *Server) handleRestoreSurvey(w http.ResponseWriter, r *http.Request) {
 		fail(err.Error())
 		return
 	}
-	responses := len(s.store.Responses(sv.ID))
+	responses := s.store.Count(sv.ID)
 	s.cfg.Logger.Info("survey restored", "survey", sv.ID, "from", hdr.Filename,
 		"kept_id", keepID, "responses", responses, "by", me.Name)
 

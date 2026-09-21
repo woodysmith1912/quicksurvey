@@ -76,7 +76,8 @@ const dbFile = "quicksurvey.db"
 // Four rather than more, because sixteen measured *worse* than four (328µs):
 // past the point where readers overlap, the extra connections buy nothing and
 // cost scheduling. Writes still serialise, which is correct and is what
-// _txlock=immediate and busy_timeout handle.
+// _txlock=immediate and busy_timeout handle. Both figures predate the seen
+// set; the ratios they show are not expected to have changed.
 var MaxConns = 4
 
 // Open prepares dir as a data directory, creating it and the database if
@@ -235,6 +236,16 @@ CREATE TABLE IF NOT EXISTS choices (
   option_id   TEXT NOT NULL,
   PRIMARY KEY (response_id, option_id)
 );
+
+-- Which options were on the ballot a respondent submitted, unioned across all
+-- of their submissions. Votes divided by this is the share of people who were
+-- shown an option and picked it, which is the only fair figure for an option
+-- added after some people had already answered.
+CREATE TABLE IF NOT EXISTS seen (
+  response_id TEXT NOT NULL REFERENCES responses(id) ON DELETE CASCADE,
+  option_id   TEXT NOT NULL,
+  PRIMARY KEY (response_id, option_id)
+);
 `
 
 // addedColumns are columns introduced after a table first shipped.
@@ -261,7 +272,165 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("adding %s.%s: %w", c.table, c.column, err)
 		}
 	}
+	if err := s.backfillSeen(); err != nil {
+		return fmt.Errorf("backfilling seen: %w", err)
+	}
 	return nil
+}
+
+// backfillSeen gives responses recorded before the seen table existed a seen
+// set, once. Nothing recorded what was on those ballots, so for most statuses
+// the assumption is the one the share-of-respondents figure already made:
+// everyone who answered saw everything on the ballot. That holds for
+// OptApproved (it was on the ballot), OptRemoved (it was on the ballot until
+// an editor deleted it — everyone who answered still saw it, and narrowing
+// this one would lose real exposures), and OptMerged (exposure resolves
+// through the merge pointer to the target, which everyone saw anyway, and the
+// tally dedupes per respondent so a duplicate exposure is harmless).
+//
+// OptPending and OptRejected are different: a pending write-in is visible
+// only to the respondent who proposed it, and a rejected one was only ever
+// visible to its proposer before a moderator refused it. Unlike the other
+// statuses, the truth here is actually knowable — only the proposer could
+// have a vote recorded for it — so instead of guessing "everyone," those two
+// are backfilled as seen only by the response holding a vote for them. That
+// also keeps the invariant Votes <= Shown intact: any response with a
+// recorded vote for an option is guaranteed a seen row for it too, so no
+// option can come out of the backfill with more votes than exposures.
+// Guarded by a meta key rather than by the table being empty, so options
+// added after the upgrade are never marked as shown to people who answered
+// before they existed.
+func (s *Store) backfillSeen() error {
+	// Checked outside a transaction, so an up-to-date database does not take
+	// the write lock on every process start -- serve, export, backup, the
+	// user subcommands and every test store all open the store. (healthcheck
+	// does not; it is an HTTP GET.) Each per-survey transaction re-checks,
+	// because this read holds no lock.
+	var done int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM meta WHERE key = 'seen_backfilled'`).Scan(&done); err != nil {
+		return err
+	}
+	if done > 0 {
+		return nil
+	}
+
+	// Done one survey per transaction rather than the whole database in one.
+	// A single statement over every response builds a write-ahead log the
+	// size of the finished table before it can commit, and an interruption
+	// -- a kill, an OOM, a full disk -- rolls all of it back, so the next
+	// start repeats the same work and fails the same way. Per-survey commits
+	// bound the log and let a restart resume where it stopped.
+	var through string
+	var buf []byte
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'seen_backfilled_through'`).Scan(&buf)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	through = string(buf)
+
+	ids, err := s.surveyIDsAfter(through)
+	if err != nil {
+		return err
+	}
+	var total int64
+	for _, id := range ids {
+		n, err := s.backfillSeenForSurvey(id)
+		if errors.Is(err, errBackfillDone) {
+			// Another process got there first. Stop rather than opening a
+			// write transaction per remaining survey to rediscover it, and
+			// leave its completion marker alone -- that timestamp records
+			// when the work actually finished, and this process did none.
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("backfilling seen for survey %q: %w", id, err)
+		}
+		total += n
+	}
+	if total > 0 {
+		slog.Info("upgrading the database", "table", "seen", "backfilled_rows", total,
+			"surveys_scanned", len(ids))
+	}
+	// The value is the completion time rather than a flag, so a database that
+	// legitimately backfilled nothing stays distinguishable from one that
+	// never ran -- which is what makes the rollback hazard in DESIGN.md
+	// diagnosable rather than merely documented.
+	return s.tx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('seen_backfilled', ?)`,
+			[]byte(time.Now().UTC().Format(time.RFC3339))); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`DELETE FROM meta WHERE key = 'seen_backfilled_through'`)
+		return err
+	})
+}
+
+// surveyIDsAfter lists survey ids in a stable order, skipping the ones an
+// interrupted backfill already finished.
+func (s *Store) surveyIDsAfter(through string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT id FROM surveys WHERE id > ? ORDER BY id`, through)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// errBackfillDone says another process finished the backfill while this one
+// was working. It is not a failure, and it is not a per-survey condition:
+// there is nothing left for this process to do at all.
+var errBackfillDone = errors.New("backfill already completed by another process")
+
+// backfillSeenForSurvey does one survey and records that it is done, in one
+// transaction, so the marker can never claim more than was committed.
+func (s *Store) backfillSeenForSurvey(surveyID string) (int64, error) {
+	var n int64
+	err := s.tx(func(tx *sql.Tx) error {
+		// Re-checked here, not just once at the start. The cheap guard in
+		// backfillSeen is a lock-free read, so two processes -- serve and a
+		// backup or export run against the same directory -- can both pass it
+		// and both start. Whichever finishes first marks the database done
+		// and begins serving; the other would keep going and apply the
+		// blanket "everyone saw it" rule to options added since, marking them
+		// as shown to people who answered before they existed. That inflates
+		// Shown permanently and nothing would ever notice. s.tx is
+		// BEGIN IMMEDIATE, so this read is serialised against that writer.
+		var done int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM meta WHERE key = 'seen_backfilled'`).Scan(&done); err != nil {
+			return err
+		}
+		if done > 0 {
+			return errBackfillDone
+		}
+		// OptPending and OptRejected are excluded from the blanket "everyone
+		// saw it" rule below (see the doc comment); the EXISTS clause instead
+		// marks them seen only by whichever response actually voted for them.
+		res, err := tx.Exec(
+			`INSERT OR IGNORE INTO seen (response_id, option_id)
+			 SELECT r.id, o.id FROM responses r JOIN options o ON o.survey_id = r.survey_id
+			 WHERE r.survey_id = ?
+			   AND (o.status NOT IN (?, ?)
+			    OR EXISTS (SELECT 1 FROM choices c
+			               WHERE c.response_id = r.id AND c.option_id = o.id))`,
+			surveyID, OptPending, OptRejected)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		_, err = tx.Exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('seen_backfilled_through', ?)`,
+			[]byte(surveyID))
+		return err
+	})
+	return n, err
 }
 
 // ensureColumn adds a column to an existing table unless it is already there.

@@ -1,6 +1,7 @@
 package export
 
 import (
+	"io"
 	"strconv"
 	"strings"
 	"testing"
@@ -141,6 +142,142 @@ func TestRemovedOptionsStayInTheExportAndMergedOnesDoNot(t *testing.T) {
 	}
 }
 
+// A respondent whose only pick was later merged into another option must show
+// up under the target column, matching what Summary counts as a vote for it —
+// the two files describe the same person and must agree.
+func TestAPickOfAMergedDuplicateCountsForTheTargetInBothFiles(t *testing.T) {
+	s, sv := fixture(t)
+	climb := sv.Options[0].ID
+	dup, err := s.AddWriteIn(sv.ID, "v1", "Rock climbing (dup)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv, err = s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		return store.SetOptionStatus(d, dup, store.OptMerged, climb)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var b strings.Builder
+	if err := Responses(&b, sv, s.Responses(sv.ID), time.UTC); err != nil {
+		t.Fatal(err)
+	}
+	rows := grid(b.String())
+	head, row1 := rows[0], rows[1]
+	if strings.Contains(strings.Join(head, "|"), "dup") {
+		t.Errorf("the merged duplicate should not have its own column: %v", head)
+	}
+	col := -1
+	for i, h := range head {
+		if h == "Rock climbing" {
+			col = i
+		}
+	}
+	if col < 0 {
+		t.Fatalf("Rock climbing column missing from %v", head)
+	}
+	if row1[col] != "1" {
+		t.Errorf("Rock climbing column = %q, want 1 (the vote for the merged duplicate resolves here)", row1[col])
+	}
+
+	results, voters := s.Tally(sv.ID)
+	if err := Summary(io.Discard, sv, results, voters); err != nil {
+		t.Fatal(err)
+	}
+	var climbVotes int
+	for _, res := range results {
+		if res.Option.ID == climb {
+			climbVotes = res.Votes
+		}
+	}
+	if climbVotes != 1 {
+		t.Errorf("Summary counts %d votes for Rock climbing, want 1 — the wide file and the summary disagree", climbVotes)
+	}
+}
+
+// Two duplicates merged into the same target must not double-count one
+// respondent, in either file.
+func TestTwoDuplicatesMergedIntoTheSameTargetCountOneSelection(t *testing.T) {
+	s, sv := fixture(t)
+	climb := sv.Options[0].ID
+	dup1, err := s.AddWriteIn(sv.ID, "v1", "Rock climbing (dup 1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dup2, err := s.AddWriteIn(sv.ID, "v1", "Rock climbing (dup 2)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sv, err = s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		if err := store.SetOptionStatus(d, dup1, store.OptMerged, climb); err != nil {
+			return err
+		}
+		return store.SetOptionStatus(d, dup2, store.OptMerged, climb)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var b strings.Builder
+	if err := Responses(&b, sv, s.Responses(sv.ID), time.UTC); err != nil {
+		t.Fatal(err)
+	}
+	rows := grid(b.String())
+	head, row1 := rows[0], rows[1]
+	col := -1
+	for i, h := range head {
+		if h == "Rock climbing" {
+			col = i
+		}
+	}
+	if col < 0 {
+		t.Fatalf("Rock climbing column missing from %v", head)
+	}
+	if row1[col] != "1" {
+		t.Errorf("Rock climbing column = %q, want 1", row1[col])
+	}
+	selCol := len(head) - 2 // selections is second-to-last
+	if row1[selCol] != "1" {
+		t.Errorf("selections = %q, want 1 — two duplicates of the same target are one selection", row1[selCol])
+	}
+}
+
+// A removed option's column keeps reporting a respondent's historical pick
+// rather than going blank; only merged options lose their column.
+func TestARemovedOptionKeepsItsHistoricalOnesInTheExport(t *testing.T) {
+	s, sv := fixture(t)
+	escape := sv.Options[1].ID
+	if _, err := s.SaveResponse(sv.ID, "v1", []string{escape}, ""); err != nil {
+		t.Fatal(err)
+	}
+	sv, err := s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		return store.SetOptionStatus(d, escape, store.OptRemoved, "")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var b strings.Builder
+	if err := Responses(&b, sv, s.Responses(sv.ID), time.UTC); err != nil {
+		t.Fatal(err)
+	}
+	rows := grid(b.String())
+	head, row1 := rows[0], rows[1]
+	col := -1
+	for i, h := range head {
+		if h == "Escape room [removed]" {
+			col = i
+		}
+	}
+	if col < 0 {
+		t.Fatalf("removed option column missing from %v", head)
+	}
+	if row1[col] != "1" {
+		t.Errorf("removed option column = %q, want 1 — a withdrawn option keeps its historical votes", row1[col])
+	}
+}
+
 func TestSummaryTSV(t *testing.T) {
 	s, sv := fixture(t)
 	climb := sv.Options[0].ID
@@ -159,11 +296,60 @@ func TestSummaryTSV(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows := grid(b.String())
-	if rows[0][0] != "option" || rows[0][3] != "percent_of_respondents" {
+	if rows[0][0] != "option" || rows[0][3] != "percent_of_respondents" ||
+		rows[0][4] != "shown_to" || rows[0][5] != "percent_of_shown" {
 		t.Errorf("header = %v", rows[0])
 	}
-	if rows[1][0] != "Rock climbing" || rows[1][1] != "3" || rows[1][2] != "4" || rows[1][3] != "75.0" {
-		t.Errorf("top row = %v, want [Rock climbing 3 4 75.0]", rows[1])
+	if rows[1][0] != "Rock climbing" || rows[1][1] != "3" || rows[1][2] != "4" || rows[1][3] != "75.0" ||
+		rows[1][4] != "4" || rows[1][5] != "75.0" {
+		t.Errorf("top row = %v, want [Rock climbing 3 4 75.0 4 75.0]", rows[1])
+	}
+}
+
+// An option someone never had on their ballot is blank, not 0. In Sheets,
+// AVERAGE over the column then gives the share of those shown it, and COUNT
+// gives how many were.
+func TestAnOptionNeverShownToARespondentIsBlankNotZero(t *testing.T) {
+	s, sv := fixture(t)
+	if _, err := s.SaveResponse(sv.ID, "v1", []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	late, err := s.AddWriteIn(sv.ID, "v2", "Karaoke")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		return store.SetOptionStatus(d, late, store.OptApproved, "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveResponse(sv.ID, "v3", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	sv, _ = s.Survey(sv.ID)
+
+	var b strings.Builder
+	if err := Responses(&b, sv, s.Responses(sv.ID), time.UTC); err != nil {
+		t.Fatal(err)
+	}
+	rows := grid(b.String())
+	col := -1
+	for i, h := range rows[0] {
+		if h == "Karaoke" {
+			col = i
+		}
+	}
+	if col < 0 {
+		t.Fatalf("Karaoke column missing from %v", rows[0])
+	}
+	// v1 answered before it existed; v2 proposed it; v3 saw it and passed.
+	if got := []string{rows[1][col], rows[2][col], rows[3][col]}; got[0] != "" || got[1] != "1" || got[2] != "0" {
+		t.Errorf("Karaoke column = %q, want [\"\" \"1\" \"0\"]", got)
+	}
+	for i, r := range rows {
+		if len(r) != len(rows[0]) {
+			t.Errorf("row %d has %d fields, want %d", i, len(r), len(rows[0]))
+		}
 	}
 }
 
@@ -225,5 +411,166 @@ func TestFormulaInjectionIsNeutralised(t *testing.T) {
 	// The text is still readable, just inert.
 	if !strings.Contains(b.String(), "'"+attack) {
 		t.Error("the comment should be preserved, prefixed with an apostrophe")
+	}
+}
+
+// The seen set has to be resolved through merge pointers just as the choices
+// are. The case that needs it: a respondent shown a duplicate, who never saw
+// the option it was later merged into. Resolving the duplicate says they were
+// shown the target in effect, so its cell is 0 (shown, not picked) rather
+// than blank (never on their ballot) -- and a blank would understate the
+// column's COUNT, which is exactly what "how many were shown it" reads from.
+func TestTheSeenSetIsResolvedThroughMergesLikeTheChoicesAre(t *testing.T) {
+	s, sv := fixture(t)
+	v1, v2 := "v1", "v2"
+	if _, err := s.SaveResponse(sv.ID, v1, []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SaveResponse(sv.ID, v2, []string{sv.Options[1].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// v1 proposes a duplicate. Only v1 is shown it, and AddWriteIn records
+	// their vote for it.
+	dup, err := s.AddWriteIn(sv.ID, v1, "Climbing (dup)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sv, err = s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		return store.SetOptionStatus(d, dup, store.OptApproved, "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// v1 changes their mind and drops it, so it stays in their seen set but
+	// leaves their choices.
+	if _, err := s.SaveResponse(sv.ID, v1, []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// v2 proposes the option the duplicate will be merged into. It is pending,
+	// so v1 -- who does not submit again -- is never shown it directly.
+	target, err := s.AddWriteIn(sv.ID, v2, "Indoor climbing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sv, err = s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		return store.SetOptionStatus(d, target, store.OptApproved, "")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if sv, err = s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		return store.SetOptionStatus(d, dup, store.OptMerged, target)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	responses := s.Responses(sv.ID)
+	var first *store.Response
+	for _, r := range responses {
+		if r.Voter == v1 {
+			first = r
+		}
+	}
+	if first == nil {
+		t.Fatal("no response for v1")
+	}
+	if slicesContains(first.Seen, target) {
+		t.Fatalf("test setup is wrong: v1 was shown the merge target directly, " +
+			"so the export needs no resolution to answer correctly")
+	}
+	if !slicesContains(first.Seen, dup) {
+		t.Fatalf("test setup is wrong: v1 was never shown the duplicate")
+	}
+
+	var b strings.Builder
+	if err := Responses(&b, sv, responses, time.UTC); err != nil {
+		t.Fatal(err)
+	}
+	rows := grid(b.String())
+	head := rows[0]
+	col := -1
+	for i, h := range head {
+		if h == "Indoor climbing" {
+			col = i
+		}
+	}
+	if col < 0 {
+		t.Fatalf("no column for the merge target: %v", head)
+	}
+	var row []string
+	for _, r := range rows[1:] {
+		if r[0] == first.ID {
+			row = r
+		}
+	}
+	if row == nil {
+		t.Fatalf("no export row for v1")
+	}
+	if row[col] != "0" {
+		t.Errorf("the merge target's cell is %q, want \"0\" — the respondent was shown the "+
+			"duplicate it absorbed but did not pick it; a blank would read as never shown: %v",
+			row[col], row)
+	}
+}
+
+func slicesContains(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+// An option nobody was shown has no cohort, so there is no share of it to
+// report. The interface renders an em-dash rather than 0%, because "0%" reads
+// as "nobody wanted it"; the spreadsheet has to agree, and a blank keeps
+// AVERAGE honest where a 0.0 would drag it down.
+func TestSummaryLeavesInterestBlankForAnOptionNobodyWasShown(t *testing.T) {
+	s, sv := fixture(t)
+	// An option added after everyone answered was shown to nobody.
+	sv, err := s.UpdateSurvey(sv.ID, func(d *store.Survey) error {
+		_, err := store.AddOption(d, "Brand new", store.OptApproved, "editor")
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, respondents := s.Tally(sv.ID)
+
+	var b strings.Builder
+	if err := Summary(&b, sv, results, respondents); err != nil {
+		t.Fatal(err)
+	}
+	rows := grid(b.String())
+	head := rows[0]
+	shownCol, interestCol := -1, -1
+	for i, h := range head {
+		switch h {
+		case "shown_to":
+			shownCol = i
+		case "percent_of_shown":
+			interestCol = i
+		}
+	}
+	if shownCol < 0 || interestCol < 0 {
+		t.Fatalf("missing exposure columns: %v", head)
+	}
+	var checked bool
+	for _, r := range rows[1:] {
+		if r[0] != "Brand new" {
+			continue
+		}
+		checked = true
+		if r[shownCol] != "0" {
+			t.Errorf("shown_to = %q, want 0 for an option added after everyone answered", r[shownCol])
+		}
+		if r[interestCol] != "" {
+			t.Errorf("percent_of_shown = %q, want blank — there is no share of an empty cohort, "+
+				"and the interface deliberately renders an em-dash here", r[interestCol])
+		}
+	}
+	if !checked {
+		t.Fatal("the new option did not appear in the summary")
 	}
 }

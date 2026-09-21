@@ -60,12 +60,12 @@ func (s *Server) handleBallot(w http.ResponseWriter, r *http.Request) {
 		Accepting: sv.AcceptingFrom(time.Now(), preview), Preview: preview}
 	// Seed the shuffle with the respondent's own identifier, so their order is
 	// fixed across reloads and edits but unrelated to anyone else's.
-	if prev, ok := s.store.ResponseFor(sv.ID, voter); ok {
-		d.Responded, d.Comment = true, prev.Comment
-		for _, id := range prev.Choices {
+	if choices, comment, ok := s.store.PriorAnswer(sv.ID, voter); ok {
+		d.Responded, d.Comment = true, comment
+		for _, id := range choices {
 			d.Selected[id] = true
 		}
-		d.Options = sv.BallotFor(prev.Choices, voter)
+		d.Options = sv.BallotFor(choices, voter)
 	} else {
 		d.Options = sv.BallotFor(nil, voter)
 	}

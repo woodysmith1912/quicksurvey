@@ -77,11 +77,76 @@ func header(o store.Option) string {
 	return textCell(fmt.Sprintf("%s [%s]", o.Text, o.Status))
 }
 
-// Responses writes the wide, one-row-per-response table: a column per option
-// holding 1 or 0, plus the comment. This is the shape you pivot in Sheets.
+// resolvedSets resolves every choice and every seen ID through merge pointers
+// once, so the column loop can look each up in O(1) instead of rescanning
+// r.Choices and r.Seen per column. Built per response, before the column loop.
 //
-// Merged options are omitted as columns because their votes already appear
-// under the option they were merged into.
+// A cyclic merge chain cannot cause a bogus attribution here: sv.Resolve gives
+// up after a bounded walk and returns an ID whose option is still merged, and
+// merged options never become columns (see the loop that builds cols below),
+// so such a value matches nothing.
+func resolvedSets(resolve map[string]string, r *store.Response) (chosen, seen map[string]bool) {
+	chosen, seen = make(map[string]bool, len(r.Choices)), make(map[string]bool, len(r.Seen))
+	for _, id := range r.Choices {
+		chosen[resolveVia(resolve, id)] = true
+	}
+	for _, id := range r.Seen {
+		seen[resolveVia(resolve, id)] = true
+	}
+	return chosen, seen
+}
+
+// resolveMap records where each merged option ends up, once per export, so
+// the per-response work is a map lookup rather than sv.Resolve's linear scan
+// of sv.Options for every choice and every seen entry.
+//
+// That scan was the export's dominant cost: r.Seen is roughly as long as
+// sv.Options -- that is what a seen set is -- so resolving each entry by
+// scanning made the per-response work quadratic in the option count. This
+// does not make the export linear, because sv.Resolve still scans and is
+// called here; it removes the per-response multiplier, which is the term that
+// grew.
+//
+// Only merged options are mapped. Everything else resolves to itself, which
+// is what resolveVia returns for a key it does not find -- so a survey with
+// no merges builds an empty map and pays nothing.
+func resolveMap(sv *store.Survey) map[string]string {
+	var m map[string]string
+	for _, o := range sv.Options {
+		if o.Status != store.OptMerged {
+			continue
+		}
+		if m == nil {
+			m = map[string]string{}
+		}
+		resolved, _ := sv.Resolve(o.ID)
+		m[o.ID] = resolved
+	}
+	return m
+}
+
+// resolveVia matches sv.Resolve's contract for an ID the survey does not
+// contain: it resolves to itself, and so matches no column.
+func resolveVia(resolve map[string]string, id string) string {
+	if to, ok := resolve[id]; ok {
+		return to
+	}
+	return id
+}
+
+// Responses writes the wide, one-row-per-response table: a column per option
+// holding 1 (picked), 0 (shown, not picked) or blank (never on that person's
+// ballot), plus a selection count and the comment. This is the shape you
+// pivot in Sheets.
+//
+// Merged options are omitted as columns; a choice or a seen entry that points
+// at one is resolved to the option it was merged into before being matched
+// against a column, so a respondent whose only pick was later merged away
+// still shows 1 under the option it became. selections counts each resolved
+// column at most once, so two duplicates picked and merged into the same
+// option count as one selection. Note it is not the same figure Summary
+// reports: Summary is fed the tally, which counts approved options only,
+// while these columns include pending, rejected and removed ones.
 func Responses(w io.Writer, sv *store.Survey, responses []*store.Response, loc *time.Location) error {
 	bw := bufio.NewWriter(w)
 
@@ -101,14 +166,22 @@ func Responses(w io.Writer, sv *store.Survey, responses []*store.Response, loc *
 		return err
 	}
 
+	resolve := resolveMap(sv)
 	for _, r := range responses {
 		rec := []string{r.ID, r.Created.In(loc).Format(time.RFC3339), r.Updated.In(loc).Format(time.RFC3339)}
+		chosen, seen := resolvedSets(resolve, r)
 		n := 0
 		for _, o := range cols {
-			if r.Chose(o.ID) {
+			switch {
+			case chosen[o.ID]:
 				rec, n = append(rec, "1"), n+1
-			} else {
+			case seen[o.ID]:
 				rec = append(rec, "0")
+			default:
+				// Never on this person's ballot. Blank rather than 0, so a
+				// column's AVERAGE in Sheets is the share of those who were
+				// shown it and its COUNT is how many were.
+				rec = append(rec, "")
 			}
 		}
 		rec = append(rec, fmt.Sprint(n), textCell(r.Comment))
@@ -119,17 +192,28 @@ func Responses(w io.Writer, sv *store.Survey, responses []*store.Response, loc *
 	return bw.Flush()
 }
 
-// Summary writes the tally: one row per option with vote count and the share of
-// respondents who chose it. Percentages do not sum to 100, because a respondent
-// may thumbs-up any number of options.
+// Summary writes the tally: one row per option with its vote count, its share
+// of all respondents, how many respondents were shown it, and its share of
+// those. Percentages do not sum to 100, because a respondent may thumbs-up any
+// number of options.
 func Summary(w io.Writer, sv *store.Survey, results []store.Result, respondents int) error {
 	bw := bufio.NewWriter(w)
-	if err := row(bw, "option", "votes", "respondents", "percent_of_respondents"); err != nil {
+	if err := row(bw, "option", "votes", "respondents", "percent_of_respondents",
+		"shown_to", "percent_of_shown"); err != nil {
 		return err
 	}
 	for _, res := range results {
+		// Blank, not 0.0, when nobody was shown the option: there is no
+		// share of an empty cohort, and "0.0" reads as "nobody wanted it".
+		// The interface refuses to print it for the same reason, and a
+		// spreadsheet ignores a blank in AVERAGE rather than dragging it to
+		// zero.
+		interest := ""
+		if res.Shown > 0 {
+			interest = fmt.Sprintf("%.1f", res.ShownPercent)
+		}
 		if err := row(bw, textCell(res.Option.Text), fmt.Sprint(res.Votes), fmt.Sprint(respondents),
-			fmt.Sprintf("%.1f", res.Percent)); err != nil {
+			fmt.Sprintf("%.1f", res.Percent), fmt.Sprint(res.Shown), interest); err != nil {
 			return err
 		}
 	}
