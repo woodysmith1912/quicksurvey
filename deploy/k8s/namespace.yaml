@@ -5,8 +5,8 @@ metadata:
   labels:
     app.kubernetes.io/name: quicksurvey
     # The image is distroless, non-root and read-only, so it satisfies the
-    # strictest Pod Security Standard. Nothing else in this cluster sets these
-    # labels; declaring them here makes the guarantee enforced rather than
-    # merely intended.
+    # strictest Pod Security Standard. Declaring the labels here makes that
+    # guarantee enforced by the namespace itself rather than merely intended,
+    # and independent of any cluster-wide default.
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: latest

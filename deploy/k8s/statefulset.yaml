@@ -12,7 +12,7 @@
 # than corrupt, but nothing above the storage layer wants one.
 #
 # No PodDisruptionBudget: with a single replica, minAvailable: 1 would block
-# node drains indefinitely and turn every cluster upgrade into a manual step.
+# node drains indefinitely.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:

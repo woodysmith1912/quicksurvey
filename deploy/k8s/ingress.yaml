@@ -9,9 +9,8 @@
 #   --certificatesresolvers.default.acme.tlschallenge
 #
 # so every Ingress it picks up gets a Let's Encrypt certificate automatically,
-# by TLS-ALPN challenge on :443. Every existing Ingress in this cluster looks
-# exactly like this one. Adding a tls: section here would ask Traefik for a
-# secret that nothing creates.
+# by TLS-ALPN challenge on :443. Adding a tls: section here would ask Traefik
+# for a secret that nothing creates.
 #
 # BEFORE APPLYING: point quicksurveys.plainwrapworks.com at the external IP of
 # the traefik-ingress-service LoadBalancer. The TLS-ALPN challenge resolves the

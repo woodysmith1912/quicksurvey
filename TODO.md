@@ -169,34 +169,9 @@ hidden that they are already shipped.
       `GOMEMLIMIT` in the StatefulSet so the GC works against the limit instead
       of being OOM-killed blind.
 
-- [ ] FIX  Restoring a large backup can exceed the container limit on its own.
-      FIX: a 5000-response, 300-option backup peaked at 272-312 MiB. Measured
-      in both trees, so this is not new. Streaming the responses rather than
-      materialising the whole document would fix it; so would a smaller upload
-      cap.
-
-- [ ] FIX  A restore holds the write lock for the whole document.
-      FIX: `saveSurvey` issues one `Exec` per option inside a single
-      `BEGIN IMMEDIATE`. A very large survey measured 14-20s, against a 10s
-      `busy_timeout` — so every concurrent vote fails for the duration.
-
-- [ ] FIX  Duplicate references in an uploaded document surface raw SQLite text.
-      FIX: `choices` is not deduplicated on restore, so a document repeating a
-      choice fails with `UNIQUE constraint failed: choices.response_id,
-      choices.option_id` flashed verbatim to the operator. Nothing is partially
-      written. Two option entries sharing an id collapse silently instead, via
-      the upsert in `saveSurvey`. Neither is validated.
-
-- [ ] FIX  `MaxOptionText` is not enforced on restore.
-      FIX: `AddOption` caps option text at 200 characters because it is
-      re-rendered on every ballot and becomes an export column header. The
-      restore path only trims.
-
-- [ ] FIX  `Store.Responses` swallows read errors.
-      FIX: `attach` logs and returns on a failed query, leaving partially
-      populated responses. Since `seen`, a truncated read renders as "never
-      shown" rather than as an error, and `Tally` caches it until the next
-      write. Propagate the error, or refuse to cache a tally whose read failed.
+The open items from that review are in `deploy/private/restore-hardening.md`,
+for the reason `.gitignore` gives about `SECURITY-REVIEW.md`: a list of what is
+unfixed and how to reach it is a roadmap. The fixed ones are above.
 
 ## Performance, measured and accepted for now
 

@@ -50,8 +50,8 @@ gives you no way to know what is running or to roll back. `latest` deliberately
 moves only on a version tag, never on a push to `main`, so it cannot quietly
 become an untested commit.
 
-**The package must be public**, because nothing in this cluster uses a private
-registry or an `imagePullSecret`. GHCR inherits the repository's visibility, so
+**The package must be public**, unless the deployment supplies an
+`imagePullSecret`; these manifests do not. GHCR inherits the repository's visibility, so
 a public repo gives a public package with nothing to do. Check it the way the
 cluster will, without credentials:
 
@@ -117,13 +117,11 @@ deployment would do.
 `--providers.kubernetesIngress` and *not* `kubernetesCRD`, so an `IngressRoute`
 would be accepted by the API server and silently never served. TLS is automatic:
 Traefik is started with `--entrypoints.websecure.http.tls.certresolver=default`,
-so every Ingress it picks up gets a Let's Encrypt certificate. Every existing
-Ingress in this cluster looks exactly like this one. Adding a `tls:` section
-would ask Traefik for a secret that nothing creates.
+so every Ingress it picks up gets a Let's Encrypt certificate. Adding a `tls:`
+section would ask Traefik for a secret that nothing creates.
 
-**`QS_REDIRECT_HTTPS=true`.** Traefik here serves `:80` without redirecting to
-`:443` — there is no `entrypoints.web.http.redirections` in its arguments.
-Cookies are marked `Secure`, and browsers do not send those over `http://`, so
+**`QS_REDIRECT_HTTPS=true`.** Set this whenever the ingress in front does not
+itself redirect `:80` to `:443`. Cookies are marked `Secure`, and browsers do not send those over `http://`, so
 a visitor arriving on the plain port could not sign in or vote and would get no
 explanation. The app issues the redirect itself, with a 308 so a POSTed vote
 keeps its method and body. `/healthz` is exempt, because kubelet probes the pod
@@ -140,8 +138,8 @@ not reproducibly.
 StatefulSet or the PVC leaves the volume and every response on it. The default
 class deletes.
 
-**No PodDisruptionBudget.** With one replica, `minAvailable: 1` blocks node
-drains indefinitely and turns every cluster upgrade into a manual step.
+**No PodDisruptionBudget.** With one replica, `minAvailable: 1` would block
+node drains indefinitely, so none is defined.
 
 ## Backups
 
