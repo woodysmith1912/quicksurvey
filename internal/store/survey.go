@@ -264,6 +264,33 @@ func saveSurvey(tx *sql.Tx, sv *Survey) error {
 	if sv.State == StateOpen && sv.FirstOpenedAt.IsZero() {
 		sv.FirstOpenedAt = time.Now().UTC()
 	}
+	// The option ceiling is enforced here, for the same reason FirstOpenedAt
+	// is stamped here: every write passes through this function, and a limit
+	// checked anywhere else is a limit some other path can walk around. It
+	// used to live only in AddOption, so CreateSurvey's textarea and a
+	// restored document could both exceed it -- and a survey that did was
+	// unusable in a way nothing explained, because AddOption then refused
+	// every write-in forever.
+	//
+	// The ceiling exists because the whole option list is walked on every
+	// ballot render and every tally, and held in memory while the page is
+	// built. A survey large enough is an out-of-memory kill on an
+	// unauthenticated request, repeatable by anyone holding the link.
+	//
+	// An existing survey already over the ceiling may still be saved as long
+	// as it is not growing, so one can be edited back down rather than being
+	// frozen by the rule meant to prevent it.
+	if len(sv.Options) > maxOptions {
+		var existing int
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM options WHERE survey_id = ?`, sv.ID).Scan(&existing); err != nil {
+			return err
+		}
+		if len(sv.Options) > existing {
+			return fmt.Errorf("a survey may have at most %d options; this one has %d",
+				maxOptions, len(sv.Options))
+		}
+	}
 	if _, err := tx.Exec(
 		`INSERT INTO surveys (`+surveyColumns+`)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

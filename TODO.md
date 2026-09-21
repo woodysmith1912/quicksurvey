@@ -131,8 +131,11 @@ Five reviewers went over that branch and kept finding them; they belong here
 rather than in that branch's history, because fixing them there would have
 hidden that they are already shipped.
 
-- [ ] FIX  An oversized restore is an unauthenticated, persistent OOM.
-      FIX: `RestoreSurvey` enforces no ceiling on option count, and it restores
+- [x] An oversized restore is an unauthenticated, persistent OOM. Fixed: the
+      option ceiling moved to `saveSurvey`, which every write passes, so the
+      survey that caused it can no longer be created by any route. `MaxUpload`
+      dropped to 1 MiB and `GOMEMLIMIT` set below the container limit.
+      Was: `RestoreSurvey` enforced no ceiling on option count, and it restores
       `state`, so an editor can upload an 8 MiB "backup" carrying ~345,000
       options that comes back **open**. `GET /s/{id}` is unauthenticated and
       `render` buffers the whole page: one anonymous request measured a 146 MiB
@@ -143,9 +146,11 @@ hidden that they are already shipped.
       The ceiling belongs where every write passes rather than in `AddOption`
       alone — see the next item, which is the same defect from the other side.
 
-- [ ] FIX  `maxOptions` is enforced on one of three write paths, so it is not
-      an invariant.
-      FIX: `AddOption` checks it; `CreateSurvey` and `RestoreSurvey` do not.
+- [x] `maxOptions` is enforced on one of three write paths, so it is not an
+      invariant. Fixed: it is checked in `saveSurvey` now, with a carve-out so
+      a survey already over the ceiling can be saved unchanged or smaller and
+      edited back down rather than frozen.
+      Was: only `AddOption` checked it; `CreateSurvey` and `RestoreSurvey` did not.
       A survey past 500 options is therefore constructible through the ordinary
       new-survey textarea, and once it exists every write-in is refused forever
       with "survey already has the maximum of 500 options" — true, and useless
@@ -153,9 +158,11 @@ hidden that they are already shipped.
       which every write passes, with a carve-out so an over-size survey can
       still be edited downwards rather than being frozen.
 
-- [ ] FIX  The 8 MiB upload cap is too large for a 192Mi container, and the
-      runtime does not know the limit exists.
-      FIX: decoding an adversarial 8 MiB document peaked at 190.7 MiB in a
+- [x] The 8 MiB upload cap is too large for a 192Mi container, and the runtime
+      does not know the limit exists. Fixed: `MaxUpload` is 1 MiB and
+      `GOMEMLIMIT` is 160MiB in the StatefulSet, so the collector works against
+      the cgroup rather than discovering it by being killed.
+      Was: decoding an adversarial 8 MiB document peaked at 190.7 MiB in a
       standalone process — 99.3% of the cap, before any serving footprint. The
       cap was sized on "far past anything this application is for", which is
       true of real backups and irrelevant to hostile ones. Lower it, and set

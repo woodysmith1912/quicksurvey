@@ -61,6 +61,12 @@ spec:
               containerPort: 8080
               protocol: TCP
           env:
+            # A soft limit below the hard one, so the garbage collector works
+            # against the cgroup instead of discovering it by being killed. Go
+            # sizes the heap from the machine otherwise, and the node is much
+            # larger than this container is allowed to be.
+            - name: GOMEMLIMIT
+              value: "160MiB"
             - name: QS_DATA_DIR
               value: /data
             - name: QS_ADDR

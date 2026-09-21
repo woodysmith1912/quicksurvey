@@ -2,7 +2,6 @@ package store
 
 import (
 	"bytes"
-	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -608,50 +607,6 @@ func TestADocumentWithNoVersionIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no version") {
 		t.Errorf("error = %q, want it to say the version is missing", err)
-	}
-}
-
-// A seen set larger than SQLite's bind-variable ceiling has to be written in
-// batches. At two variables per row the hard limit is 16383, and a statement
-// that reaches it fails with a raw driver string -- on the restore path, that
-// means a backup that cannot be restored at all.
-func TestASeenSetLargerThanOneStatementStillRestores(t *testing.T) {
-	const n = 20000 // comfortably past 32766/2
-	s := newStore(t)
-
-	opts := make([]DocumentOption, n)
-	ids := make([]string, n)
-	for i := range opts {
-		ids[i] = fmt.Sprintf("o%05d", i)
-		opts[i] = DocumentOption{ID: ids[i], Text: fmt.Sprintf("Option %d", i), Status: OptApproved}
-	}
-	doc := &Document{
-		Format: docFormat, Version: docVersion, SourceID: "bigsurvey",
-		Survey: DocumentBody{
-			Type: TypeThumbsUp, Title: "Big", State: StateOpen, Options: opts,
-			Created: time.Now().UTC(), Updated: time.Now().UTC(),
-			FirstOpenedAt: time.Now().UTC(),
-		},
-		Responses: []DocumentResponse{{
-			Voter:   "v1",
-			Choices: []string{ids[0]},
-			Seen:    ids,
-			Created: time.Now().UTC(), Updated: time.Now().UTC(),
-		}},
-	}
-
-	got, err := s.RestoreSurvey(doc, true)
-	if err != nil {
-		t.Fatalf("restoring a response shown %d options failed: %v", n, err)
-	}
-	var seen int
-	if err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM seen sn JOIN responses r ON r.id = sn.response_id
-		 WHERE r.survey_id = ?`, got.ID).Scan(&seen); err != nil {
-		t.Fatal(err)
-	}
-	if seen != n {
-		t.Errorf("%d seen rows stored, want %d — the batched insert lost rows", seen, n)
 	}
 }
 

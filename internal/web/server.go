@@ -128,13 +128,20 @@ const (
 const MaxBody = 64 << 10
 
 // MaxUpload bounds the one request that carries a file rather than a form: a
-// restored survey, which is as large as the responses in it. Still a cap, and
-// only reachable by an editor who is signed in.
+// restored survey, which is as large as the responses in it. Only reachable by
+// an editor who is signed in.
 //
-// A full backup runs to roughly 200 bytes per response, so this is tens of
-// thousands of them — far past anything this application is for, which is the
-// point: the limit should never be the thing someone hits.
-const MaxUpload = 8 << 20
+// A full backup runs to roughly 200 bytes per response, so this holds several
+// thousand of them — comfortably past any survey this application is for.
+//
+// It was eight times larger, sized on the reasoning that the cap should never
+// be the thing anyone hits. That reasoning holds for a real backup and not at
+// all for a hostile one: decoding an adversarial document of that size peaked
+// at 190MB in a standalone process, against a container limit of 192Mi, before
+// any serving footprint. A restore is rare and an editor who legitimately
+// needs a larger one can say so; a cap that a single request can use to
+// exhaust the pod is not a cap.
+const MaxUpload = 1 << 20
 
 // restorePath is named because two places have to agree on it: the route, and
 // the body limit above.

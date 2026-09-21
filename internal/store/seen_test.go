@@ -1,8 +1,11 @@
 package store
 
 import (
+	"database/sql"
+	"fmt"
 	"slices"
 	"testing"
+	"time"
 )
 
 // seenByText returns the option texts a respondent has been shown, which is
@@ -375,6 +378,124 @@ func TestBallotAndVisibleToAgreeOnWhatIsOnTheBallot(t *testing.T) {
 		}
 		if shown[minePending] {
 			t.Error("someone else's pending write-in is on a newcomer's ballot")
+		}
+	})
+}
+
+// insertSeen writes the whole set in one statement at two bind variables per
+// row, and SQLite stops at 32766 -- so above 16383 rows an unbatched
+// statement fails with "too many SQL variables", and on the restore path that
+// meant a backup that could not be restored at all.
+//
+// The option ceiling now makes a set that large unreachable through any
+// ordinary route, which is the real defence. This pins the batching itself,
+// because a bound that depends on a limit enforced somewhere else is the
+// arrangement that produced the bug in the first place.
+func TestInsertSeenBatchesBeyondTheBindVariableLimit(t *testing.T) {
+	const n = 20000 // comfortably past 32766/2
+	s := newStore(t)
+	sv := mustSurvey(t, s, "Tacos")
+	voter := s.VoterID(sv.ID, "a")
+	if _, err := s.SaveResponse(sv.ID, voter, []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	r, ok := s.ResponseFor(sv.ID, voter)
+	if !ok {
+		t.Fatal("no response")
+	}
+
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("synthetic%05d", i)
+	}
+	if err := s.tx(func(tx *sql.Tx) error { return insertSeen(tx, r.ID, ids) }); err != nil {
+		t.Fatalf("writing %d seen rows in one call failed: %v", n, err)
+	}
+
+	var got int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM seen WHERE response_id = ? AND option_id LIKE 'synthetic%'`,
+		r.ID).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != n {
+		t.Errorf("%d rows stored, want %d — the batched insert lost rows", got, n)
+	}
+}
+
+// The option ceiling is enforced in saveSurvey, where every write passes.
+// Enforcing it in AddOption alone left two ways around it -- the new-survey
+// textarea and a restored document -- and a survey that got past it was
+// unusable in a way nothing explained: the whole option list is walked on
+// every ballot render, so a large enough one is an out-of-memory kill on an
+// unauthenticated request.
+func TestTheOptionCeilingHoldsOnEveryWritePath(t *testing.T) {
+	texts := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("Option %d", i)
+		}
+		return out
+	}
+
+	t.Run("CreateSurvey", func(t *testing.T) {
+		s := newStore(t)
+		if _, err := s.CreateSurvey("Big", "", texts(maxOptions+1)); err == nil {
+			t.Error("a survey past the ceiling was created through CreateSurvey")
+		}
+		if _, err := s.CreateSurvey("Fine", "", texts(maxOptions)); err != nil {
+			t.Errorf("a survey exactly at the ceiling was refused: %v", err)
+		}
+	})
+
+	t.Run("UpdateSurvey", func(t *testing.T) {
+		s := newStore(t)
+		sv, err := s.CreateSurvey("Grow", "", texts(maxOptions))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.UpdateSurvey(sv.ID, func(d *Survey) error {
+			_, err := AddOption(d, "One too many", OptApproved, "editor")
+			return err
+		}); err == nil {
+			t.Error("a survey grew past the ceiling through UpdateSurvey")
+		}
+	})
+
+	t.Run("an over-size survey can still be edited downwards", func(t *testing.T) {
+		s := newStore(t)
+		sv, err := s.CreateSurvey("Legacy", "", texts(maxOptions))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Force the database past the ceiling, as a survey created before it
+		// was enforced everywhere would be.
+		for i := range 3 {
+			if _, err := s.db.Exec(
+				`INSERT INTO options (id, survey_id, position, text, status, source, merged_into, created)
+				 VALUES (?, ?, ?, ?, ?, 'editor', '', ?)`,
+				fmt.Sprintf("legacy%d", i), sv.ID, maxOptions+i,
+				fmt.Sprintf("Legacy %d", i), OptApproved, dbTime(time.Now().UTC())); err != nil {
+				t.Fatal(err)
+			}
+		}
+		over, ok := s.Survey(sv.ID)
+		if !ok || len(over.Options) != maxOptions+3 {
+			t.Fatalf("setup: want %d options, got %d", maxOptions+3, len(over.Options))
+		}
+		// Saving it unchanged, or smaller, must work — otherwise the rule
+		// meant to prevent an unusable survey is what makes it unfixable.
+		if _, err := s.UpdateSurvey(sv.ID, func(d *Survey) error {
+			d.Title = "Legacy, retitled"
+			return nil
+		}); err != nil {
+			t.Errorf("an over-size survey could not be saved unchanged: %v", err)
+		}
+		if _, err := s.UpdateSurvey(sv.ID, func(d *Survey) error {
+			d.Options = d.Options[:len(d.Options)-1]
+			return nil
+		}); err != nil {
+			t.Errorf("an over-size survey could not be shrunk: %v", err)
 		}
 	})
 }
