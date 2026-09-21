@@ -151,6 +151,12 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Closing the store is what makes SQLite fold the write-ahead log back
+	// into the database file. Without it a long-running server leaves the log
+	// holding most of the data and the database file nearly empty -- safe,
+	// since the log is read on open, but a trap for anyone who copies the one
+	// file expecting a backup.
+	defer st.Close()
 	if err := bootstrapAdmin(st, log); err != nil {
 		return err
 	}
@@ -187,6 +193,13 @@ func serve(args []string) error {
 		"login_rate", *loginRate, "voter_rate", *voterRate)
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
+	}
+	// Explicit as well as implicit, so the result is logged rather than left
+	// to be inferred from a file size. Neither this nor the deferred Close
+	// runs if the process is killed outright; SQLite recovers from the log on
+	// the next open either way.
+	if err := st.Checkpoint(); err != nil {
+		log.Warn("could not checkpoint the write-ahead log", "err", err)
 	}
 	log.Info("stopped")
 	return nil

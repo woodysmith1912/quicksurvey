@@ -141,6 +141,22 @@ func Open(dir string) (*Store, error) {
 // Close releases the database.
 func (s *Store) Close() error { return s.db.Close() }
 
+// Checkpoint folds the write-ahead log back into the database file and
+// truncates it.
+//
+// SQLite does this on its own when the log passes a page threshold, and again
+// when the last connection to the database closes. Neither is guaranteed to
+// have happened at any particular moment, so a long-lived process can leave a
+// database file that is nearly empty beside a log holding everything in it.
+// That is correct -- the log is read on open and nothing is lost -- but it is
+// a trap for anyone who copies the database file on its own and believes they
+// have a backup. Calling this on the way out leaves one file that means what
+// it looks like it means.
+func (s *Store) Checkpoint() error {
+	_, err := s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	return err
+}
+
 // Dir reports the data directory backing the store.
 func (s *Store) Dir() string { return s.dir }
 

@@ -691,3 +691,73 @@ func TestInitialPasswordSubcommandReadsAndThenCannot(t *testing.T) {
 		t.Errorf("unhelpful message: %v", err)
 	}
 }
+
+// A store that is closed leaves one file that means what it looks like it
+// means. Without this, a long-running server keeps almost everything in the
+// write-ahead log and the database file stays nearly empty -- correct, because
+// the log is read on open, but a trap for anyone who copies the database file
+// alone and believes they have a backup. It is an easy mistake to make and it
+// gives no warning.
+func TestClosingTheStoreFoldsTheWriteAheadLogBackIn(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Enough writes that the log holds something worth folding in.
+	sv := mustSurvey(t, s, "Alpha", "Bravo")
+	for i := range 40 {
+		v := s.VoterID(sv.ID, fmt.Sprintf("voter-%d", i))
+		if _, err := s.SaveResponse(sv.ID, v, []string{sv.Options[0].ID}, "a comment"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wal := filepath.Join(dir, dbFile+"-wal")
+	walBefore := fileSize(t, wal)
+	if walBefore == 0 {
+		t.Fatal("precondition: expected a non-empty write-ahead log")
+	}
+	dbBefore := fileSize(t, filepath.Join(dir, dbFile))
+
+	// Checkpoint on its own, with the store still open, so its effect is
+	// observed independently of Close -- which folds the log in as well, and
+	// would otherwise make a do-nothing Checkpoint look like it worked.
+	if err := s.Checkpoint(); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	if after := fileSize(t, wal); after >= walBefore {
+		t.Errorf("write-ahead log is %d bytes, was %d — Checkpoint did not truncate it",
+			after, walBefore)
+	}
+	if after := fileSize(t, filepath.Join(dir, dbFile)); after <= dbBefore {
+		t.Errorf("database file is %d bytes, was %d — Checkpoint did not fold the log in",
+			after, dbBefore)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if fi, err := os.Stat(wal); err == nil && fi.Size() > 0 {
+		t.Errorf("write-ahead log still holds %d bytes after close", fi.Size())
+	}
+
+	// And the data really is all there when reopened from the file alone.
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if n := len(s2.Responses(sv.ID)); n != 40 {
+		t.Errorf("%d responses after reopening, want 40", n)
+	}
+}
+
+func fileSize(t *testing.T, path string) int64 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Size()
+}

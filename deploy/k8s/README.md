@@ -165,6 +165,19 @@ Streamed rather than copied: `kubectl cp` runs `tar` inside the container, and
 there is no tar in a distroless image. `-to -` writes the snapshot to stdout,
 which needs nothing in the container but the binary.
 
+**The database file on its own is not the database.** SQLite in WAL mode keeps
+recent commits in `quicksurvey.db-wal` and only folds them into
+`quicksurvey.db` when it checkpoints. The server does that on a clean shutdown,
+but a process that is killed outright does not, and until then the main file
+can be a few kilobytes while the log holds everything. Copying
+`quicksurvey.db` alone in that state gets you an empty survey, silently. Take a
+whole-volume snapshot, or use the streamed backup above, which is consistent by
+construction. If you must copy files, copy `quicksurvey.db`, `-wal` and `-shm`
+together, and never place one file beside another's log.
+
+A long-running server that has never restarted cleanly can sit in this state
+indefinitely, with the main file a few kilobytes and the log holding the rest.
+
 The backup carries the instance HMAC key. Restoring without it invalidates every
 session and voter cookie: responses survive, but returning respondents look new
 and can vote again.
