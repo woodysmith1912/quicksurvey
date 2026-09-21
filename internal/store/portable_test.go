@@ -2,9 +2,11 @@ package store
 
 import (
 	"bytes"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // approvedTexts returns a survey's approved option texts, in ballot order.
@@ -520,8 +522,24 @@ func TestRestoringAPartialSeenSetStillCannotReportMoreVotesThanExposures(t *test
 		t.Fatalf("precondition: want one response shown both options, got %+v", doc.Responses)
 	}
 	// A hand-edited or third-party document: seen omits an option that was
-	// nonetheless chosen.
-	doc.Responses[0].Seen = []string{doc.Responses[0].Seen[1]}
+	// nonetheless chosen. Chosen by option text rather than by position --
+	// the seen set is read back with no ORDER BY, so indexing into it picks
+	// whichever id happens to sort second and the assertion below would be
+	// satisfied by luck as often as by the code under test.
+	var tacos, ramen string
+	for _, o := range doc.Survey.Options {
+		switch o.Text {
+		case "Tacos":
+			tacos = o.ID
+		case "Ramen":
+			ramen = o.ID
+		}
+	}
+	if tacos == "" || ramen == "" {
+		t.Fatalf("test setup: could not find both options in the document")
+	}
+	doc.Responses[0].Seen = []string{ramen}
+	_ = tacos
 	if err := s.DeleteSurvey(sv.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -590,5 +608,97 @@ func TestADocumentWithNoVersionIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no version") {
 		t.Errorf("error = %q, want it to say the version is missing", err)
+	}
+}
+
+// A seen set larger than SQLite's bind-variable ceiling has to be written in
+// batches. At two variables per row the hard limit is 16383, and a statement
+// that reaches it fails with a raw driver string -- on the restore path, that
+// means a backup that cannot be restored at all.
+func TestASeenSetLargerThanOneStatementStillRestores(t *testing.T) {
+	const n = 20000 // comfortably past 32766/2
+	s := newStore(t)
+
+	opts := make([]DocumentOption, n)
+	ids := make([]string, n)
+	for i := range opts {
+		ids[i] = fmt.Sprintf("o%05d", i)
+		opts[i] = DocumentOption{ID: ids[i], Text: fmt.Sprintf("Option %d", i), Status: OptApproved}
+	}
+	doc := &Document{
+		Format: docFormat, Version: docVersion, SourceID: "bigsurvey",
+		Survey: DocumentBody{
+			Type: TypeThumbsUp, Title: "Big", State: StateOpen, Options: opts,
+			Created: time.Now().UTC(), Updated: time.Now().UTC(),
+			FirstOpenedAt: time.Now().UTC(),
+		},
+		Responses: []DocumentResponse{{
+			Voter:   "v1",
+			Choices: []string{ids[0]},
+			Seen:    ids,
+			Created: time.Now().UTC(), Updated: time.Now().UTC(),
+		}},
+	}
+
+	got, err := s.RestoreSurvey(doc, true)
+	if err != nil {
+		t.Fatalf("restoring a response shown %d options failed: %v", n, err)
+	}
+	var seen int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM seen sn JOIN responses r ON r.id = sn.response_id
+		 WHERE r.survey_id = ?`, got.ID).Scan(&seen); err != nil {
+		t.Fatal(err)
+	}
+	if seen != n {
+		t.Errorf("%d seen rows stored, want %d — the batched insert lost rows", seen, n)
+	}
+}
+
+// Both reference checks are strict, and neither strictness was pinned: a
+// document naming an option it does not carry is malformed, and restoring it
+// would silently drop a vote or an exposure.
+func TestADocumentNamingAnOptionItDoesNotCarryIsRefused(t *testing.T) {
+	build := func(mangle func(*DocumentResponse)) *Document {
+		r := DocumentResponse{
+			Voter:   "v1",
+			Choices: []string{"o1"},
+			Seen:    []string{"o1"},
+			Created: time.Now().UTC(), Updated: time.Now().UTC(),
+		}
+		mangle(&r)
+		return &Document{
+			Format: docFormat, Version: docVersion, SourceID: "src",
+			Survey: DocumentBody{
+				Type: TypeThumbsUp, Title: "T", State: StateOpen,
+				Options: []DocumentOption{{ID: "o1", Text: "Tacos", Status: OptApproved}},
+				Created: time.Now().UTC(), Updated: time.Now().UTC(),
+				FirstOpenedAt: time.Now().UTC(),
+			},
+			Responses: []DocumentResponse{r},
+		}
+	}
+	for _, c := range []struct {
+		name, want string
+		mangle     func(*DocumentResponse)
+	}{
+		{"a chosen option", "chose option", func(r *DocumentResponse) {
+			r.Choices = append(r.Choices, "ghost")
+		}},
+		{"a seen option", "was shown option", func(r *DocumentResponse) {
+			r.Seen = append(r.Seen, "ghost")
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := newStore(t)
+			_, err := s.RestoreSurvey(build(c.mangle), true)
+			if err == nil {
+				t.Fatal("a document naming an option it does not carry was restored; the " +
+					"reference would point at nothing")
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Errorf("error = %q, want it to name what the response referenced", err)
+			}
+		})
 	}
 }

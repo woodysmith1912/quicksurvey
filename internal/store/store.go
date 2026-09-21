@@ -384,13 +384,13 @@ func (s *Store) surveyIDsAfter(through string) ([]string, error) {
 	return ids, rows.Err()
 }
 
-// backfillSeenForSurvey does one survey and records that it is done, in one
-// transaction, so the marker can never claim more than was committed.
 // errBackfillDone says another process finished the backfill while this one
 // was working. It is not a failure, and it is not a per-survey condition:
 // there is nothing left for this process to do at all.
 var errBackfillDone = errors.New("backfill already completed by another process")
 
+// backfillSeenForSurvey does one survey and records that it is done, in one
+// transaction, so the marker can never claim more than was committed.
 func (s *Store) backfillSeenForSurvey(surveyID string) (int64, error) {
 	var n int64
 	err := s.tx(func(tx *sql.Tx) error {

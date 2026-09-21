@@ -124,6 +124,101 @@
 - `quicksurvey user add` does not suppress terminal echo — that would cost an
   external dependency for a fallback path. Pipe the password instead.
 
+## Restore hardening — predates the shown-count work, found reviewing it
+
+These are all reachable on `main` today, independently of the `seen` feature.
+Five reviewers went over that branch and kept finding them; they belong here
+rather than in that branch's history, because fixing them there would have
+hidden that they are already shipped.
+
+- [ ] FIX  An oversized restore is an unauthenticated, persistent OOM.
+      FIX: `RestoreSurvey` enforces no ceiling on option count, and it restores
+      `state`, so an editor can upload an 8 MiB "backup" carrying ~345,000
+      options that comes back **open**. `GET /s/{id}` is unauthenticated and
+      `render` buffers the whole page: one anonymous request measured a 146 MiB
+      body, 858 MiB peak heap and ~1 GB RSS against a 192Mi pod. The survey
+      persists, so the pod is killed again on every subsequent request by
+      anyone who has the URL. The upload needs the editor role, but the payload
+      is a plausible-looking JSON file that no editor can eyeball.
+      The ceiling belongs where every write passes rather than in `AddOption`
+      alone — see the next item, which is the same defect from the other side.
+
+- [ ] FIX  `maxOptions` is enforced on one of three write paths, so it is not
+      an invariant.
+      FIX: `AddOption` checks it; `CreateSurvey` and `RestoreSurvey` do not.
+      A survey past 500 options is therefore constructible through the ordinary
+      new-survey textarea, and once it exists every write-in is refused forever
+      with "survey already has the maximum of 500 options" — true, and useless
+      to the anonymous respondent who sees it. Enforce it in `saveSurvey`,
+      which every write passes, with a carve-out so an over-size survey can
+      still be edited downwards rather than being frozen.
+
+- [ ] FIX  The 8 MiB upload cap is too large for a 192Mi container, and the
+      runtime does not know the limit exists.
+      FIX: decoding an adversarial 8 MiB document peaked at 190.7 MiB in a
+      standalone process — 99.3% of the cap, before any serving footprint. The
+      cap was sized on "far past anything this application is for", which is
+      true of real backups and irrelevant to hostile ones. Lower it, and set
+      `GOMEMLIMIT` in the StatefulSet so the GC works against the limit instead
+      of being OOM-killed blind.
+
+- [ ] FIX  Restoring a large backup can exceed the container limit on its own.
+      FIX: a 5000-response, 300-option backup peaked at 272-312 MiB. Measured
+      in both trees, so this is not new. Streaming the responses rather than
+      materialising the whole document would fix it; so would a smaller upload
+      cap.
+
+- [ ] FIX  A restore holds the write lock for the whole document.
+      FIX: `saveSurvey` issues one `Exec` per option inside a single
+      `BEGIN IMMEDIATE`. A very large survey measured 14-20s, against a 10s
+      `busy_timeout` — so every concurrent vote fails for the duration.
+
+- [ ] FIX  Duplicate references in an uploaded document surface raw SQLite text.
+      FIX: `choices` is not deduplicated on restore, so a document repeating a
+      choice fails with `UNIQUE constraint failed: choices.response_id,
+      choices.option_id` flashed verbatim to the operator. Nothing is partially
+      written. Two option entries sharing an id collapse silently instead, via
+      the upsert in `saveSurvey`. Neither is validated.
+
+- [ ] FIX  `MaxOptionText` is not enforced on restore.
+      FIX: `AddOption` caps option text at 200 characters because it is
+      re-rendered on every ballot and becomes an export column header. The
+      restore path only trims.
+
+- [ ] FIX  `Store.Responses` swallows read errors.
+      FIX: `attach` logs and returns on a failed query, leaving partially
+      populated responses. Since `seen`, a truncated read renders as "never
+      shown" rather than as an error, and `Tally` caches it until the next
+      write. Propagate the error, or refuse to cache a tally whose read failed.
+
+## Performance, measured and accepted for now
+
+Recorded rather than fixed: no high-load use is expected soon. Figures are in
+the branch's review history, not here.
+
+- [ ] NPTF The cold tally costs about three times what it did before `seen`.
+      `countOnce` resolves each option id through a linear scan of the option
+      list, the same shape that was fixed in the exporter. A resolve map there
+      measured a useful improvement and is the obvious first move if this ever
+      matters. Most of the remainder is the row volume `seen` adds, which
+      counting in SQL rather than in Go would remove.
+- [ ] NPTF The wide export carries a flat overhead per response, from the two
+      maps `resolvedSets` builds for each one. Marking a reusable array indexed
+      by column measured at parity with the pre-feature exporter.
+- [ ] NPTF The `seen` backfill chunks by whole survey, so a single large survey
+      still runs as one unbounded transaction with no resume point. Chunking by
+      response id range within a survey would bound every shape.
+- [ ] NPTF Reading a survey document parses it twice. `ReadSurveyDocument`
+      unmarshals the whole body leniently just to read `format` and `version`,
+      then decodes it again strictly. On a large backup the header scan is
+      about half the parse phase and all of it is wasted work; the version
+      could be read from the leading tokens instead. It exists so that a
+      document from a newer build reports its version rather than blaming a
+      field it does not recognise, which is worth keeping — just not at this
+      price if restores ever get big.
+- [ ] NPTF `Survey.Option` is a linear scan returning a large struct by value.
+      It is the shared root of the tally and export costs above.
+
 ## Deliberately not built (YAGNI)
 - Question types other than thumbs-up. `Survey.Type` exists so adding one does
   not need a migration.

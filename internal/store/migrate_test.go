@@ -478,3 +478,58 @@ func TestAFailedSurveyDoesNotAdvanceTheResumeMarker(t *testing.T) {
 		t.Error("the backfill marked itself complete despite failing partway")
 	}
 }
+
+// When another process completes the backfill first, this one must stop
+// rather than open a write transaction per remaining survey — and it must
+// leave the winner's completion timestamp alone, because that value is what
+// records when the work actually finished.
+func TestABackfillThatLosesTheRaceStopsAndLeavesTheMarkerAlone(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	sv := mustSurvey(t, s, "Alpha")
+	if _, err := s.SaveResponse(sv.ID, s.VoterID(sv.ID, "a"), []string{sv.Options[0].ID}, ""); err != nil {
+		t.Fatal(err)
+	}
+	// Clear the seen rows so a backfill would have work to do, and plant the
+	// completion marker as the winning process would have.
+	if _, err := s.db.Exec(`DELETE FROM seen`); err != nil {
+		t.Fatal(err)
+	}
+	const winner = "2020-01-01T00:00:00Z"
+	if _, err := s.db.Exec(
+		`INSERT OR REPLACE INTO meta (key, value) VALUES ('seen_backfilled', ?)`,
+		[]byte(winner)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The loser is already past its own unlocked guard, so it calls this.
+	n, err := s.backfillSeenForSurvey(sv.ID)
+	if !errors.Is(err, errBackfillDone) {
+		t.Fatalf("backfillSeenForSurvey = (%d, %v), want errBackfillDone so the caller can stop",
+			n, err)
+	}
+	if n != 0 {
+		t.Errorf("reported %d rows backfilled while bailing", n)
+	}
+
+	var rows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM seen`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 0 {
+		t.Errorf("%d seen rows written by a process that had already lost the race", rows)
+	}
+	var marker []byte
+	if err := s.db.QueryRow(
+		`SELECT value FROM meta WHERE key = 'seen_backfilled'`).Scan(&marker); err != nil {
+		t.Fatal(err)
+	}
+	if string(marker) != winner {
+		t.Errorf("completion marker = %q, want %q — the loser overwrote the timestamp "+
+			"recording when the work actually finished", marker, winner)
+	}
+}

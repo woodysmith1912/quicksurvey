@@ -269,19 +269,34 @@ func loadIDs(q queryer, query string, args ...any) ([]string, error) {
 // against the primary key makes rows that are already there a no-op, which is
 // what lets the whole set be written without first deleting it.
 func insertSeen(tx *sql.Tx, responseID string, ids []string) error {
-	if len(ids) == 0 {
-		return nil
+	rid := any(responseID)
+	for len(ids) > 0 {
+		n := min(len(ids), seenInsertBatch)
+		values := make([]string, 0, n)
+		args := make([]any, 0, n*2)
+		for _, id := range ids[:n] {
+			values = append(values, "(?, ?)")
+			args = append(args, rid, id)
+		}
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO seen (response_id, option_id) VALUES `+strings.Join(values, ", "),
+			args...); err != nil {
+			return err
+		}
+		ids = ids[n:]
 	}
-	values := make([]string, 0, len(ids))
-	args := make([]any, 0, len(ids)*2)
-	for _, id := range ids {
-		values = append(values, "(?, ?)")
-		args = append(args, responseID, id)
-	}
-	_, err := tx.Exec(
-		`INSERT OR IGNORE INTO seen (response_id, option_id) VALUES `+strings.Join(values, ", "), args...)
-	return err
+	return nil
 }
+
+// seenInsertBatch bounds how many rows go into one statement. Two bind
+// variables per row against SQLite's ceiling of 32766 puts the hard limit at
+// 16383 rows, and a statement that reaches it fails with "too many SQL
+// variables" -- which on the restore path means a backup that cannot be
+// restored at all, reported as a raw driver string. A survey should never
+// have that many options, but "should never" is what a ceiling enforced in
+// one of three write paths buys, so the batch is bounded here where it is
+// cheap and local rather than assumed to be bounded somewhere else.
+const seenInsertBatch = 1000
 
 // loadResponse reads one respondent's answer. withSeen controls whether the
 // seen set comes with it: it is roughly as long as the survey's option list,

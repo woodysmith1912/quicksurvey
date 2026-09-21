@@ -301,8 +301,9 @@ func (s *Store) RestoreSurvey(doc *Document, keepID bool) (*Survey, error) {
 	for i, o := range doc.Survey.Options {
 		text := strings.TrimSpace(o.Text)
 		if text == "" {
-			return nil, fmt.Errorf("option %d has no text; a document cannot be restored "+
-				"in part, because every response that names that option would be wrong", i+1)
+			return nil, fmt.Errorf("option %d has no text; a document is restored whole or "+
+				"not at all, because a survey missing an option is not the survey that "+
+				"was saved", i+1)
 		}
 		source := o.Source
 		if source != "writein" {
@@ -388,7 +389,10 @@ func restorableResponses(doc *Document, optionID map[string]string) ([]*Response
 		// Every option in the document maps, because a document with an
 		// unrestorable option was refused above -- so an unresolvable seen
 		// entry means the same thing an unresolvable choice does.
-		held := make(map[string]bool, len(dr.Seen)+len(r.Choices))
+		// Sized by what can actually be held, not by what the document
+		// claims: the keys are option ids, so the live set cannot exceed the
+		// option count however many times the document repeats one.
+		held := make(map[string]bool, min(len(dr.Seen)+len(r.Choices), len(optionID)))
 		for _, sn := range dr.Seen {
 			to, ok := optionID[sn]
 			if !ok {
